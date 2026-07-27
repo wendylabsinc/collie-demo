@@ -19,6 +19,7 @@ from collie_demo.runtime import (
     DEMO_CONFIRMATION,
     DEMO_GO_CONFIRMATION,
     NAVIGATION_ARM_CONFIRMATION,
+    VOICE_MISSION_CONFIRMATION,
     CollieRuntime,
     RuntimeCommandError,
 )
@@ -196,6 +197,18 @@ class NearBananaDetector:
                 center=(640, 645),
             )
         ]
+
+
+class NearBananaThenLostDetector(NearBananaDetector):
+    """Simulate the fruit leaving the lower camera edge after forward motion."""
+
+    def __init__(self, avoidance: FakeAvoidance) -> None:
+        self.avoidance = avoidance
+
+    def detect(self, image: object) -> list[FruitDetection]:
+        if any(move[0] > 0.0 for move in self.avoidance.moves):
+            return []
+        return super().detect(image)
 
 
 class MotionCoupledHeading:
@@ -1108,7 +1121,7 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             motion=motion,
             motion_enabled=True,
             allow_unranged_forward=True,
-            produce_detector=NearBananaDetector(),
+            produce_detector=NearBananaThenLostDetector(avoidance),
             loop_hz=60.0,
             maximum_produce_age_s=0.75,
             follow_period_s=0.02,
@@ -1190,6 +1203,8 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert status["mission"]["arrival_hello_status"] == "complete"
             assert status["mission"]["arrival_hello_error"] is None
             assert status["mission"]["near_target_seen"] is True
+            assert status["mission"]["final_approach_status"] == "complete"
+            assert status["mission"]["final_approach_measured_distance_m"] >= 0.10
             assert status["mission"]["return_home_status"] == "complete"
             assert status["mission"]["return_distance_m"] <= 0.02
             assert status["mission"]["home_pose"] == {
@@ -1207,6 +1222,104 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert all(move[2] != 0.20 for move in avoidance.moves)
             assert any(move[0] > 0.0 for move in avoidance.moves)
             assert any(abs(move[2]) > 0.0 for move in avoidance.moves)
+            assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = MotionCoupledPose(avoidance, sport)
+        runtime = CollieRuntime(
+            camera=NearBananaCamera(),
+            controller=ApproachController(
+                ApproachConfig(
+                    stable_frames_required=2,
+                    maximum_target_age_s=0.75,
+                    forward_mps=0.08,
+                    forward_budget_s=0.08,
+                )
+            ),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=NearBananaThenLostDetector(avoidance),
+            loop_hz=60.0,
+            maximum_produce_age_s=0.75,
+            follow_period_s=0.02,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                enabled=True,
+                autonomous_turn_enabled=True,
+                direct_turn_enabled=True,
+                match_stretch_enabled=True,
+                match_stretch_settle_s=0.0,
+                match_reacquire_timeout_s=1.0,
+                arrival_hello_enabled=True,
+                arrival_hello_settle_s=0.0,
+                return_home_enabled=True,
+                return_arrival_tolerance_m=0.02,
+                return_heading_tolerance_rad=0.10,
+                return_heading_gate_rad=0.55,
+                return_forward_mps=0.08,
+                return_yaw_gain=1.2,
+                return_timeout_s=3.0,
+                return_stall_timeout_s=0.75,
+                return_stall_min_progress_m=0.005,
+                match_confirmations_required=2,
+                approach_misses_allowed=2,
+                turn_angle_rad=0.65,
+                turn_rate_rps=0.20,
+                turn_tolerance_rad=0.05,
+                turn_timeout_s=1.5,
+                search_rate_rps=0.10,
+                search_sweep_rad=2.5,
+                search_timeout_s=1.5,
+            ),
+        )
+        await runtime.start()
+        try:
+            for _ in range(100):
+                if (await runtime.status())["produce"]["detections"]:
+                    break
+                await asyncio.sleep(0.01)
+
+            started = await runtime.start_voice_mission(
+                "banana",
+                "Find the banana",
+                VOICE_MISSION_CONFIRMATION,
+            )
+            assert started["memory"]["label"] == "banana"
+            assert started["memory"]["has_reference"] is False
+            assert started["voice"]["last_heard"] == "Find the banana"
+            assert started["voice"]["mission_active"] is True
+
+            for _ in range(500):
+                status = await runtime.status()
+                if (
+                    status["mission"]["phase"] == "aborted"
+                    or (
+                        status["mission"]["phase"] == "success"
+                        and not status["voice"]["mission_active"]
+                    )
+                ):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("voice mission did not finish")
+
+            assert status["mission"]["phase"] == "success", repr(
+                (status["mission"], status["last_error"], status["voice"])
+            )
+            assert status["voice"]["last_event"] == "voice_mission_complete"
+            assert status["voice"]["mission_active"] is False
+            assert status["mission"]["return_home_status"] == "complete"
+            assert sport.hello_calls == 1
+            assert sport.stretch_calls == 1
+            assert any(move[0] > 0.0 for move in avoidance.moves)
             assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
         finally:
             await runtime.close()

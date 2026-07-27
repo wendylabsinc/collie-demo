@@ -31,6 +31,26 @@ class NavigationCommandRequest(BaseModel):
     yaw_rps: float
 
 
+class FinalApproachCalibrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    distance_m: float
+
+
+class VoiceEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event: str
+    transcript: str = ""
+    target: str | None = None
+    error: str = ""
+
+
+class VoiceMissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: str
+    transcript: str
+    confirmation: str
+
+
 def create_app(runtime: CollieRuntime, web_directory: Path) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -152,10 +172,39 @@ def create_app(runtime: CollieRuntime, web_directory: Path) -> FastAPI:
     async def stop_demo() -> dict[str, object]:
         return await runtime.stop_demo()
 
+    @app.post("/api/calibration/final-approach")
+    async def calibrate_final_approach(
+        request: FinalApproachCalibrationRequest,
+    ) -> dict[str, object]:
+        try:
+            return await runtime.set_final_approach_distance(request.distance_m)
+        except RuntimeCommandError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/demo/go")
     async def approve_demo_go(request: ArmRequest) -> dict[str, object]:
         try:
             return await runtime.approve_demo_go(request.confirmation)
+        except RuntimeCommandError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/voice/event")
+    async def voice_event(request: VoiceEventRequest) -> dict[str, object]:
+        return await runtime.record_voice_event(
+            event=request.event,
+            transcript=request.transcript,
+            target=request.target,
+            error=request.error,
+        )
+
+    @app.post("/api/voice/mission")
+    async def voice_mission(request: VoiceMissionRequest) -> dict[str, object]:
+        try:
+            return await runtime.start_voice_mission(
+                request.target,
+                request.transcript,
+                request.confirmation,
+            )
         except RuntimeCommandError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

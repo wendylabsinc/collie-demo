@@ -17,6 +17,7 @@ class MissionPhase(str, Enum):
     WAITING_FOR_GO = "waiting_for_go"
     CONFIRMING = "confirming"
     APPROACHING = "approaching"
+    FINAL_APPROACHING = "final_approaching"
     CELEBRATING = "celebrating"
     RETURNING_HOME = "returning_home"
     SUCCESS = "success"
@@ -57,6 +58,14 @@ class MissionConfig:
     search_timeout_s: float = 9.0
     near_bottom_ratio: float = 0.86
     near_center_ratio: float = 0.72
+    near_bbox_height_ratio: float = 0.15
+    near_confirmations_required: int = 3
+    near_loss_grace_s: float = 0.75
+    final_approach_distance_m: float = 0.10
+    final_approach_mps: float = 0.10
+    final_approach_timeout_s: float = 3.0
+    final_approach_stall_timeout_s: float = 1.0
+    final_approach_stall_min_progress_m: float = 0.01
 
     def __post_init__(self) -> None:
         if self.capture_timeout_s <= 0.0:
@@ -65,6 +74,16 @@ class MissionConfig:
             raise ValueError("match_confirmations_required must be positive")
         if self.approach_misses_allowed < 1:
             raise ValueError("approach_misses_allowed must be positive")
+        if self.near_confirmations_required < 1:
+            raise ValueError("near_confirmations_required must be positive")
+        for name in (
+            "near_bottom_ratio",
+            "near_center_ratio",
+            "near_bbox_height_ratio",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} must be between zero and one")
         for name in (
             "turn_angle_rad",
             "turn_rate_rps",
@@ -84,6 +103,12 @@ class MissionConfig:
             "return_timeout_s",
             "return_stall_timeout_s",
             "return_stall_min_progress_m",
+            "near_loss_grace_s",
+            "final_approach_distance_m",
+            "final_approach_mps",
+            "final_approach_timeout_s",
+            "final_approach_stall_timeout_s",
+            "final_approach_stall_min_progress_m",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0.0:
@@ -98,6 +123,8 @@ class MissionConfig:
             or self.arrival_hello_settle_s < 0.0
         ):
             raise ValueError("arrival_hello_settle_s must be non-negative")
+        if self.final_approach_distance_m > 0.30:
+            raise ValueError("final_approach_distance_m cannot exceed 0.30 m")
 
 
 @dataclass(slots=True)
@@ -110,6 +137,13 @@ class MissionTelemetry:
     match_failures: int = 0
     last_match: dict[str, object] | None = None
     near_target_seen: bool = False
+    near_target_recent: bool = False
+    near_target_confirmations: int = 0
+    near_target_bbox_height_ratio: float | None = None
+    final_approach_status: str = "not_requested"
+    final_approach_elapsed_s: float = 0.0
+    final_approach_commanded_distance_m: float = 0.0
+    final_approach_measured_distance_m: float = 0.0
     initial_hello_status: str = "not_requested"
     initial_hello_error: str | None = None
     match_stretch_status: str = "not_requested"
@@ -135,6 +169,19 @@ class MissionTelemetry:
             "match_failures": self.match_failures,
             "last_match": self.last_match,
             "near_target_seen": self.near_target_seen,
+            "near_target_recent": self.near_target_recent,
+            "near_target_confirmations": self.near_target_confirmations,
+            "near_target_bbox_height_ratio": None
+            if self.near_target_bbox_height_ratio is None
+            else round(self.near_target_bbox_height_ratio, 3),
+            "final_approach_status": self.final_approach_status,
+            "final_approach_elapsed_s": round(self.final_approach_elapsed_s, 3),
+            "final_approach_commanded_distance_m": round(
+                self.final_approach_commanded_distance_m, 3
+            ),
+            "final_approach_measured_distance_m": round(
+                self.final_approach_measured_distance_m, 3
+            ),
             "initial_hello_status": self.initial_hello_status,
             "initial_hello_error": self.initial_hello_error,
             "match_stretch_status": self.match_stretch_status,
