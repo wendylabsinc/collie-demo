@@ -1,0 +1,26 @@
+{
+  "appId": "collie-stage-audio",
+  "version": "0.1.3",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "audio"
+    }
+  ],
+  "env": {
+    "COLLIE_VOICE_WS_URL": "ws://192.168.0.107:8098/api/audio/ws",
+    "ALSA_CAPTURE_DEVICE": "hw:0,0",
+    "ALSA_PLAYBACK_DEVICE": "plughw:0,0",
+    "PIPEWIRE_CAPTURE_NODE": "walker.echo.cancel.source",
+    "PIPEWIRE_PLAYBACK_NODE": "walker.echo.cancel.sink"
+  },
+  "readiness": {
+    "tcpSocket": {
+      "port": 8099
+    },
+    "timeoutSeconds": 30
+  }
+}

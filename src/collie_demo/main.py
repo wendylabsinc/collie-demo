@@ -125,6 +125,30 @@ def build_runtime() -> CollieRuntime:
         near_center_ratio=float(
             os.environ.get("COLLIE_NEAR_CENTER_RATIO", "0.72")
         ),
+        near_bbox_height_ratio=float(
+            os.environ.get("COLLIE_NEAR_BBOX_HEIGHT_RATIO", "0.15")
+        ),
+        near_confirmations_required=int(
+            os.environ.get("COLLIE_NEAR_CONFIRMATIONS", "3")
+        ),
+        near_loss_grace_s=float(
+            os.environ.get("COLLIE_NEAR_LOSS_GRACE_S", "0.75")
+        ),
+        final_approach_distance_m=float(
+            os.environ.get("COLLIE_FINAL_APPROACH_DISTANCE_M", "0.10")
+        ),
+        final_approach_mps=float(
+            os.environ.get("COLLIE_FINAL_APPROACH_MPS", "0.10")
+        ),
+        final_approach_timeout_s=float(
+            os.environ.get("COLLIE_FINAL_APPROACH_TIMEOUT_S", "3.0")
+        ),
+        final_approach_stall_timeout_s=float(
+            os.environ.get("COLLIE_FINAL_APPROACH_STALL_TIMEOUT_S", "1.0")
+        ),
+        final_approach_stall_min_progress_m=float(
+            os.environ.get("COLLIE_FINAL_APPROACH_STALL_MIN_PROGRESS_M", "0.01")
+        ),
     )
     controller_config = ApproachConfig(
         stable_frames_required=int(os.environ.get("COLLIE_STABLE_FRAMES", "3")),
@@ -140,6 +164,7 @@ def build_runtime() -> CollieRuntime:
                 maximum_forward_mps=max(
                     controller_config.forward_mps,
                     mission_config.return_forward_mps,
+                    mission_config.final_approach_mps,
                 ),
                 maximum_yaw_rps=max(
                     controller_config.maximum_yaw_rps,

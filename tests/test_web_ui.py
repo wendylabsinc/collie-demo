@@ -97,3 +97,36 @@ def test_memory_demo_ui_keeps_stop_and_manual_fallback() -> None:
     assert "Fruit to reject" not in html
     assert 'id="stop"' in html
     assert "following||demoActive||startingFollow||startingDemo" in html
+
+
+def test_touch_range_is_calibrated_as_measured_distance() -> None:
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+
+    assert "Touch-range calibration" in html
+    assert 'id="final-distance"' in html
+    assert 'min="2" max="30"' in html
+    assert "Extra measured travel" in html
+    assert "final_approach_measured_distance_m" in html
+    assert (
+        "await api('/api/calibration/final-approach',{distance_m:cm/100})"
+        in html
+    )
+
+
+def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+
+    assert "Say: “Find the apple”" in html
+    assert 'id="voice-state"' in html
+    assert 'id="voice-live"' in html
+    assert 'id="voice-start"' in html
+    assert 'id="voice-stop"' in html
+    assert 'id="voice-bark"' in html
+    assert ":8098/api/status" not in html  # assembled from the shared origin
+    assert "webrtc_connected" in html
+    assert "scribe_connected" in html
+    assert "last_partial" in html
+    assert "mic_source" in html
+    assert "voiceStart.onclick" in html
+    assert "voiceStop.onclick" in html
+    assert "voiceBark.onclick" in html

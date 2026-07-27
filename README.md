@@ -11,13 +11,25 @@ artifact.
 Frames come directly from Unitree's public `VideoClient`; inference,
 annotation, motion supervision, and the browser UI all run locally in the
 robot container. No Roboflow service, hosted inference API, Hugging Face key,
-or internet connection is used at runtime.
+or internet connection is used for vision inference. The optional voice service
+streams microphone PCM to ElevenLabs Scribe v2 Realtime; motion control and
+fruit inference remain on Woof.
 
 ## Current behavior
 
 - Bundles the local PyTorch source checkpoint and Woof-specific TensorRT FP16
   engine; runtime inference does not call a hosted API.
 - Detects only the three visual-prompt classes: apple, banana, and pear.
+- Runs a separate persistent Go2 WebRTC microphone service on port 8098. It
+  accepts only deterministic `Find [the] apple|banana|pear` commands plus
+  `stop|abort|cancel`; arbitrary transcripts can never become motor commands.
+- A committed Find command plays the user-supplied native AudioHub bark, stores
+  only the requested YOLO class, and starts the normal guarded mission. The
+  voice bridge automatically releases Go only after the mission reports a fresh
+  multi-frame class lock and all stage-health checks remain ready.
+- Loads the Scribe credential from the root-only Wendy persistent volume at
+  `/state/elevenlabs.env`. The API key is never baked into an image, committed,
+  returned by `/api/status`, or printed to logs.
 - Runs the Orin-specific `collie-fruit-yoloe11m.engine` with the model task
   explicitly set to `segment`; this is required because a serialized TensorRT
   engine cannot reliably infer its Ultralytics task from the filename.
@@ -220,6 +232,7 @@ Verify the actual deployed runtime before considering it ready:
 ```sh
 wendy --device woof.local device ps --json
 curl http://woof.local:8096/api/status
+curl http://woof.local:8098/api/status
 ```
 
 Then open `http://woof.local:8096/`. A healthy status response must report the
@@ -276,3 +289,21 @@ The feature is controlled by `COLLIE_MEMORY_DEMO_ENABLED` and
 `COLLIE_AUTONOMOUS_TURN_ENABLED`. Matching, turn speed/angle, search limits,
 and arrival geometry are environment-configurable in the Dockerfile. Disabling
 either feature does not remove or weaken the manual follower and STOP path.
+
+## Voice stage sequence
+
+1. Verify the page reports `LISTENING`, a fresh microphone age, Scribe
+   connected, and the main header reports `STAGE READY`.
+2. Clear the full turn, approach, and return paths.
+3. Say exactly `Find the apple`, `Find the banana`, or `Find the pear`.
+4. Woof barks, captures Home, turns, searches for that YOLO class, performs the
+   stock Stretch acknowledgement, automatically revalidates and approaches it,
+   uses the stock Hello paw-forward arrival gesture, and returns Home.
+5. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency
+   stop boundary.
+
+The browser exposes voice Start, Stop, and Test Bark controls. The voice
+service owns no motion client: it can only call `POST /api/voice/mission` with
+the exact `VOICE COMMAND HEARD` confirmation. The Collie runtime still owns
+freshness checks, class locking, velocity leases, watchdogs, arrival
+classification, and return-home.

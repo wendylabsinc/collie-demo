@@ -24,6 +24,7 @@ ARM_CONFIRMATION = "TARGET AND PATH CLEAR"
 NAVIGATION_ARM_CONFIRMATION = "MAP AND PATH CLEAR"
 DEMO_CONFIRMATION = "TARGET SAVED AND AREA CLEAR"
 DEMO_GO_CONFIRMATION = "CLASS LOCKED AND PATH CLEAR"
+VOICE_MISSION_CONFIRMATION = "VOICE COMMAND HEARD"
 
 
 class CameraProtocol(Protocol):
@@ -170,6 +171,9 @@ class CollieRuntime:
         self.class_matcher = class_matcher or FruitClassMatcher()
         self.heading_provider = heading_provider
         self.mission_config = mission_config or MissionConfig()
+        self._final_approach_distance_m = (
+            self.mission_config.final_approach_distance_m
+        )
         self._state_lock = asyncio.Lock()
         self._stream_condition = asyncio.Condition()
         self._action_lock = asyncio.Lock()
@@ -221,6 +225,14 @@ class CollieRuntime:
         self._mission = MissionTelemetry()
         self._mission_task: asyncio.Task[None] | None = None
         self._demo_go_event = asyncio.Event()
+        self._voice_autogo_task: asyncio.Task[None] | None = None
+        self._voice_status: dict[str, object] = {
+            "last_event": "waiting_for_voice_service",
+            "last_heard": "",
+            "last_target": None,
+            "error": "",
+            "mission_active": False,
+        }
 
     async def start(self) -> None:
         if self.heading_provider is not None:
@@ -243,6 +255,7 @@ class CollieRuntime:
         async with self._stream_condition:
             self._stream_condition.notify_all()
         self._follow_start_generation += 1
+        await self._cancel_voice_autogo()
         if self._mission_task is not None:
             self._mission_task.cancel()
             try:
@@ -710,6 +723,7 @@ class CollieRuntime:
     async def reset_round(self) -> dict[str, object]:
         """Atomically stop every controller and invalidate the previous round."""
 
+        await self._cancel_voice_autogo()
         async with self._state_lock:
             self._round_generation += 1
             self._round_id = uuid.uuid4().hex
@@ -740,6 +754,9 @@ class CollieRuntime:
             self._home_pose = None
             self._target_lock_id += 1
             self._clear_selection_locked()
+            if self._voice_status["mission_active"]:
+                self._voice_status["last_event"] = "voice_mission_reset"
+            self._voice_status["mission_active"] = False
             self._mission = MissionTelemetry(
                 phase=MissionPhase.IDLE,
                 reason="round_reset",
@@ -754,7 +771,178 @@ class CollieRuntime:
     async def memory_reference_jpeg(self) -> bytes | None:
         async with self._state_lock:
             memory = self._fruit_memory
-        return None if memory is None else memory.reference_jpeg
+        return (
+            None
+            if memory is None or not memory.reference_jpeg
+            else memory.reference_jpeg
+        )
+
+    async def record_voice_event(
+        self,
+        *,
+        event: str,
+        transcript: str = "",
+        target: str | None = None,
+        error: str = "",
+    ) -> dict[str, object]:
+        """Record non-authoritative voice telemetry for the stage UI.
+
+        This method never changes motion state. Only ``start_voice_mission``
+        may turn a committed, allowlisted transcript into a guarded mission.
+        """
+
+        async with self._state_lock:
+            self._voice_status["last_event"] = event.strip()[:120]
+            if transcript.strip():
+                self._voice_status["last_heard"] = transcript.strip()[:240]
+            if target is not None:
+                self._voice_status["last_target"] = target
+            self._voice_status["error"] = error.strip()[:500]
+        return await self.status()
+
+    async def start_voice_mission(
+        self,
+        target_name: str,
+        transcript: str,
+        confirmation: str,
+    ) -> dict[str, object]:
+        """Start the normal guarded mission from an allowlisted voice label.
+
+        Speech does not command the motors. It creates the same class memory
+        used by the UI, starts the existing measured turn/search mission, and
+        releases Go only after that mission reports a fresh class lock.
+        """
+
+        if confirmation.strip().upper() != VOICE_MISSION_CONFIRMATION:
+            raise RuntimeCommandError(
+                f'type exactly "{VOICE_MISSION_CONFIRMATION}"'
+            )
+        canonical_name = self._canonical_target_name(target_name)
+        if canonical_name not in {"apple", "banana", "pear"}:
+            raise RuntimeCommandError("voice target must be apple, banana, or pear")
+        if self._mission_task is not None and not self._mission_task.done():
+            raise RuntimeCommandError("a fruit mission is already active")
+        if (
+            self._voice_autogo_task is not None
+            and not self._voice_autogo_task.done()
+        ):
+            raise RuntimeCommandError("a voice mission is already active")
+
+        await self.reset_round()
+        async with self._state_lock:
+            generation = self._round_generation
+            self._fruit_memory = FruitMemory.create(
+                label=canonical_name,
+                reference_jpeg=b"",
+                reference_bbox_xyxy=(0, 0, 1, 1),
+            )
+            self._mission = MissionTelemetry(
+                phase=MissionPhase.MEMORIZED,
+                reason="voice_target_class_set",
+            )
+            self._voice_status.update(
+                {
+                    "last_event": "voice_mission_starting",
+                    "last_heard": transcript.strip()[:240],
+                    "last_target": canonical_name,
+                    "error": "",
+                    "mission_active": True,
+                }
+            )
+
+        try:
+            await self.start_demo(DEMO_CONFIRMATION)
+        except Exception as exc:
+            async with self._state_lock:
+                self._voice_status["last_event"] = "voice_mission_rejected"
+                self._voice_status["error"] = str(exc)[:500]
+                self._voice_status["mission_active"] = False
+            raise
+        self._voice_autogo_task = asyncio.create_task(
+            self._voice_autogo_loop(generation)
+        )
+        return await self.status()
+
+    async def _cancel_voice_autogo(self) -> None:
+        task = self._voice_autogo_task
+        if task is None:
+            return
+        self._voice_autogo_task = None
+        if task is asyncio.current_task() or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _voice_autogo_loop(self, generation: int) -> None:
+        current_task = asyncio.current_task()
+        deadline = time.monotonic() + (
+            self.mission_config.turn_timeout_s
+            + self.mission_config.search_timeout_s
+            + self.mission_config.match_reacquire_timeout_s
+            + 10.0
+        )
+        try:
+            while time.monotonic() < deadline:
+                async with self._state_lock:
+                    phase = self._mission.phase
+                    active = bool(
+                        self._mission_task is not None
+                        and not self._mission_task.done()
+                    )
+                    same_round = generation == self._round_generation
+                if not same_round:
+                    return
+                if phase == MissionPhase.WAITING_FOR_GO:
+                    await self.approve_demo_go(DEMO_GO_CONFIRMATION)
+                    async with self._state_lock:
+                        self._voice_status["last_event"] = "voice_go_released"
+                    while same_round:
+                        async with self._state_lock:
+                            phase = self._mission.phase
+                            same_round = generation == self._round_generation
+                        if phase in {MissionPhase.SUCCESS, MissionPhase.ABORTED}:
+                            break
+                        await asyncio.sleep(0.1)
+                    async with self._state_lock:
+                        self._voice_status["last_event"] = (
+                            "voice_mission_complete"
+                            if phase == MissionPhase.SUCCESS
+                            else "voice_mission_aborted"
+                        )
+                        self._voice_status["mission_active"] = False
+                        if phase == MissionPhase.ABORTED:
+                            self._voice_status["error"] = self._mission.reason
+                    return
+                if phase == MissionPhase.ABORTED or not active:
+                    async with self._state_lock:
+                        self._voice_status["last_event"] = "voice_mission_aborted"
+                        self._voice_status["mission_active"] = False
+                        self._voice_status["error"] = self._mission.reason
+                    return
+                await asyncio.sleep(0.05)
+            await self.stop("voice_mission_timeout")
+            async with self._state_lock:
+                self._mission.phase = MissionPhase.ABORTED
+                self._mission.reason = "voice_mission_timeout"
+                self._voice_status["last_event"] = "voice_mission_timeout"
+                self._voice_status["mission_active"] = False
+                self._voice_status["error"] = (
+                    "voice mission timed out before class lock"
+                )
+        except asyncio.CancelledError:
+            raise
+        except RuntimeCommandError as exc:
+            await self.stop(f"voice_mission_abort:{exc}")
+            async with self._state_lock:
+                self._voice_status["last_event"] = "voice_mission_aborted"
+                self._voice_status["mission_active"] = False
+                self._voice_status["error"] = str(exc)
+        finally:
+            if self._voice_autogo_task is current_task:
+                self._voice_autogo_task = None
 
     async def start_demo(self, confirmation: str) -> dict[str, object]:
         if confirmation.strip().upper() != DEMO_CONFIRMATION:
@@ -875,6 +1063,37 @@ class CollieRuntime:
         async with self._state_lock:
             self._mission.phase = MissionPhase.ABORTED
             self._mission.reason = "operator_stop"
+        return await self.status()
+
+    async def set_final_approach_distance(
+        self, distance_m: float
+    ) -> dict[str, object]:
+        """Set the measured post-vision creep distance while Woof is idle."""
+
+        distance_m = float(distance_m)
+        if not math.isfinite(distance_m) or not 0.02 <= distance_m <= 0.30:
+            raise RuntimeCommandError(
+                "final approach distance must be between 0.02 and 0.30 m"
+            )
+        async with self._action_lock:
+            mission_active = bool(
+                self._mission_task is not None and not self._mission_task.done()
+            )
+            if (
+                self._lease is not None
+                or self._motion_owner is not None
+                or mission_active
+                or (self.motion is not None and self.motion.armed)
+            ):
+                raise RuntimeCommandError(
+                    "stop Woof before changing final approach calibration"
+                )
+            self._final_approach_distance_m = distance_m
+        print(
+            "final_approach calibration "
+            f"distance_m={distance_m:.3f}",
+            flush=True,
+        )
         return await self.status()
 
     async def pulse(self) -> dict[str, object]:
@@ -1111,6 +1330,20 @@ class CollieRuntime:
                         math.degrees(self.mission_config.search_sweep_rad), 1
                     ),
                     "search_timeout_s": self.mission_config.search_timeout_s,
+                    "near_bottom_ratio": self.mission_config.near_bottom_ratio,
+                    "near_center_ratio": self.mission_config.near_center_ratio,
+                    "near_bbox_height_ratio": (
+                        self.mission_config.near_bbox_height_ratio
+                    ),
+                    "near_confirmations_required": (
+                        self.mission_config.near_confirmations_required
+                    ),
+                    "near_loss_grace_s": self.mission_config.near_loss_grace_s,
+                    "final_approach_distance_m": self._final_approach_distance_m,
+                    "final_approach_mps": self.mission_config.final_approach_mps,
+                    "final_approach_timeout_s": (
+                        self.mission_config.final_approach_timeout_s
+                    ),
                     "active": mission_active,
                     "return_home_enabled": self.mission_config.return_home_enabled,
                     "return_arrival_tolerance_m": (
@@ -1220,6 +1453,7 @@ class CollieRuntime:
                 "memory": None
                 if self._fruit_memory is None
                 else self._fruit_memory.to_status(now),
+                "voice": dict(self._voice_status),
                 "mission": mission_status,
                 "navigation": await self.navigation_status(),
                 "command": self._command.to_dict(),
@@ -1540,6 +1774,8 @@ class CollieRuntime:
             match = await self._wait_for_demo_go(match)
             await self._start_memory_approach(match)
             approach_reason = await self._monitor_memory_approach()
+            await self.stop("demo_visual_approach_complete")
+            approach_reason = await self._run_final_approach(approach_reason)
             await self.stop("demo_target_reached")
             await self._celebrate_target_reached()
             if self.mission_config.return_home_enabled:
@@ -1556,6 +1792,8 @@ class CollieRuntime:
             reason = str(exc)
             await self.stop(f"demo_abort:{reason}")
             async with self._state_lock:
+                if self._mission.phase == MissionPhase.FINAL_APPROACHING:
+                    self._mission.final_approach_status = "failed"
                 if self._mission.phase == MissionPhase.RETURNING_HOME:
                     self._mission.return_home_status = "failed"
                 self._mission.phase = MissionPhase.ABORTED
@@ -1564,6 +1802,8 @@ class CollieRuntime:
             reason = f"demo_internal_error:{exc}"
             await self.stop(reason)
             async with self._state_lock:
+                if self._mission.phase == MissionPhase.FINAL_APPROACHING:
+                    self._mission.final_approach_status = "failed"
                 if self._mission.phase == MissionPhase.RETURNING_HOME:
                     self._mission.return_home_status = "failed"
                 self._mission.phase = MissionPhase.ABORTED
@@ -1993,16 +2233,33 @@ class CollieRuntime:
             self._mission.reason = "approaching_saved_fruit_class"
             self._mission.match_failures = 0
 
-    async def _monitor_memory_approach(self) -> str:
-        deadline = (
-            time.monotonic()
-            + self.controller.config.forward_budget_s
-            + 4.0
+    def _near_target_geometry(
+        self,
+        target: TargetObservation | None,
+        frame_height: int | None,
+    ) -> tuple[bool, float | None]:
+        if target is None or not frame_height:
+            return False, None
+        _, y, _, height = target.bbox_xywh
+        bottom_ratio = (y + height) / frame_height
+        center_ratio = target.center[1] / frame_height
+        bbox_height_ratio = height / frame_height
+        return (
+            bottom_ratio >= self.mission_config.near_bottom_ratio
+            and center_ratio >= self.mission_config.near_center_ratio
+            and bbox_height_ratio >= self.mission_config.near_bbox_height_ratio,
+            bbox_height_ratio,
         )
+
+    async def _monitor_memory_approach(self) -> str:
+        deadline = time.monotonic() + self.controller.config.forward_budget_s + 4.0
         last_frame_id: int | None = None
         failures = 0
         near_target_seen = False
+        near_confirmations = 0
+        last_near_at: float | None = None
         while time.monotonic() < deadline:
+            now = time.monotonic()
             async with self._state_lock:
                 memory = self._fruit_memory
                 frame = self._produce_frame
@@ -2022,17 +2279,29 @@ class CollieRuntime:
                 command_reason = self._command.reason
             if memory is None:
                 raise RuntimeCommandError("saved fruit memory disappeared")
-            if target is not None and frame_height:
-                x, y, width, height = target.bbox_xywh
-                bottom_ratio = (y + height) / frame_height
-                center_ratio = target.center[1] / frame_height
+            near_geometry, bbox_height_ratio = self._near_target_geometry(
+                target, frame_height
+            )
+            if near_geometry:
+                near_confirmations += 1
                 if (
-                    bottom_ratio >= self.mission_config.near_bottom_ratio
-                    and center_ratio >= self.mission_config.near_center_ratio
+                    near_confirmations
+                    >= self.mission_config.near_confirmations_required
                 ):
                     near_target_seen = True
-                    async with self._state_lock:
-                        self._mission.near_target_seen = True
+                    last_near_at = now
+            else:
+                near_confirmations = 0
+            near_target_recent = bool(
+                near_target_seen
+                and last_near_at is not None
+                and now - last_near_at <= self.mission_config.near_loss_grace_s
+            )
+            async with self._state_lock:
+                self._mission.near_target_seen = near_target_seen
+                self._mission.near_target_recent = near_target_recent
+                self._mission.near_target_confirmations = near_confirmations
+                self._mission.near_target_bbox_height_ratio = bbox_height_ratio
 
             if frame is not None and frame_id is not None and frame_id != last_frame_id:
                 last_frame_id = frame_id
@@ -2052,27 +2321,144 @@ class CollieRuntime:
                 async with self._state_lock:
                     self._mission.last_match = result.to_dict()
                     self._mission.match_failures = failures
-                if near_target_seen and result.best is None:
+                if near_target_recent and result.best is None:
                     return "target_class_reached_camera_edge"
                 if failures >= self.mission_config.approach_misses_allowed:
                     raise RuntimeCommandError("saved fruit class lost during approach")
 
             if selected_name is None:
-                if near_target_seen:
+                if near_target_recent:
                     return "target_class_reached_camera_edge"
                 raise RuntimeCommandError("saved fruit class lost before arrival")
             if not follow_active:
-                if near_target_seen and command_reason in {
+                if near_target_recent and command_reason in {
                     "selected_target_not_revalidated",
                     "selected_target_lost",
-                    "forward_budget_complete",
                 }:
                     return "target_class_reached_camera_edge"
+                if near_target_recent and command_reason == "forward_budget_complete":
+                    return "target_visible_near_forward_budget_complete"
                 raise RuntimeCommandError(f"approach stopped: {command_reason}")
             if frame_width is None:
                 raise RuntimeCommandError("camera geometry unavailable during approach")
             await asyncio.sleep(0.025)
         raise RuntimeCommandError("saved fruit approach timed out")
+
+    async def _run_final_approach(self, approach_reason: str) -> str:
+        """Advance a measured, calibrated distance after a verified edge loss."""
+
+        if approach_reason != "target_class_reached_camera_edge":
+            raise RuntimeCommandError(
+                f"final approach unavailable after {approach_reason}"
+            )
+        if self.heading_provider is None:
+            raise RuntimeCommandError(
+                "fresh Go2 local pose is unavailable for final approach"
+            )
+        initial = self.heading_provider.status()
+        if not initial.pose_healthy:
+            raise RuntimeCommandError(
+                "fresh Go2 local pose is unavailable for final approach"
+            )
+        assert initial.x_m is not None and initial.y_m is not None
+        start_x = initial.x_m
+        start_y = initial.y_m
+        target_distance = self._final_approach_distance_m
+        started_at = time.monotonic()
+        deadline = started_at + self.mission_config.final_approach_timeout_s
+        last_tick_at = started_at
+        best_distance = 0.0
+        last_progress_at = started_at
+        commanded_distance = 0.0
+        async with self._state_lock:
+            self._mission.phase = MissionPhase.FINAL_APPROACHING
+            self._mission.reason = "measured_touch_range_approach"
+            self._mission.final_approach_status = "running"
+            self._mission.final_approach_elapsed_s = 0.0
+            self._mission.final_approach_commanded_distance_m = 0.0
+            self._mission.final_approach_measured_distance_m = 0.0
+        print(
+            "final_approach event=start "
+            f"target_distance_m={target_distance:.3f} "
+            f"speed_mps={self.mission_config.final_approach_mps:.3f} "
+            f"timeout_s={self.mission_config.final_approach_timeout_s:.2f}",
+            flush=True,
+        )
+        await self.navigation_arm(NAVIGATION_ARM_CONFIRMATION)
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            async with self._state_lock:
+                camera_fresh = bool(
+                    self._last_frame_at is not None
+                    and now - self._last_frame_at < 1.0
+                )
+            if not camera_fresh:
+                raise RuntimeCommandError(
+                    "camera became stale during final approach"
+                )
+            sample = self.heading_provider.status()
+            if not sample.pose_healthy:
+                raise RuntimeCommandError(
+                    "Go2 local pose became stale during final approach"
+                )
+            assert sample.x_m is not None and sample.y_m is not None
+            measured_distance = math.hypot(
+                sample.x_m - start_x,
+                sample.y_m - start_y,
+            )
+            if measured_distance >= target_distance:
+                await self.navigation_command(0.0, 0.0)
+                elapsed = now - started_at
+                async with self._state_lock:
+                    self._mission.final_approach_status = "complete"
+                    self._mission.final_approach_elapsed_s = elapsed
+                    self._mission.final_approach_commanded_distance_m = (
+                        commanded_distance
+                    )
+                    self._mission.final_approach_measured_distance_m = (
+                        measured_distance
+                    )
+                print(
+                    "final_approach event=complete "
+                    f"elapsed_s={elapsed:.3f} "
+                    f"commanded_distance_m={commanded_distance:.3f} "
+                    f"measured_distance_m={measured_distance:.3f}",
+                    flush=True,
+                )
+                return "measured_final_approach_complete"
+            if (
+                measured_distance
+                >= best_distance
+                + self.mission_config.final_approach_stall_min_progress_m
+            ):
+                best_distance = measured_distance
+                last_progress_at = now
+            elif (
+                now - last_progress_at
+                >= self.mission_config.final_approach_stall_timeout_s
+            ):
+                raise RuntimeCommandError(
+                    "final approach stalled before touch range"
+                )
+            remaining = target_distance - measured_distance
+            command_mps = min(
+                self.mission_config.final_approach_mps,
+                max(0.04, remaining * 1.2),
+            )
+            await self.navigation_command(command_mps, 0.0)
+            tick_s = max(0.0, now - last_tick_at)
+            commanded_distance += command_mps * tick_s
+            last_tick_at = now
+            async with self._state_lock:
+                self._mission.final_approach_elapsed_s = now - started_at
+                self._mission.final_approach_commanded_distance_m = (
+                    commanded_distance
+                )
+                self._mission.final_approach_measured_distance_m = (
+                    measured_distance
+                )
+            await asyncio.sleep(0.05)
+        raise RuntimeCommandError("final approach timed out before touch range")
 
     async def _return_home(self) -> None:
         """Return to the captured start pose using fresh local odometry.

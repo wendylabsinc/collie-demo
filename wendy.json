@@ -1,12 +1,27 @@
 {
   "appId": "collie-demo",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "services": {
     "app": {
       "context": ".",
       "entitlements": [
         {"type": "network", "mode": "host"},
         {"type": "gpu"}
+      ]
+    },
+    "voice": {
+      "context": "./voice",
+      "dependsOn": ["app"],
+      "env": {
+        "COLLIE_STAGE_AUDIO_URL": "http://192.168.0.104:8099"
+      },
+      "entitlements": [
+        {"type": "network", "mode": "host"},
+        {
+          "type": "persist",
+          "name": "collie-demo-voice-state",
+          "path": "/state"
+        }
       ]
     }
   }

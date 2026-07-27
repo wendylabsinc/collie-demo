@@ -17,7 +17,8 @@
     .actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.choose,.save{padding:9px 12px;white-space:nowrap}.save{background:#126548}.choose.selected{outline:3px solid #55f09a;background:#226e51}
     #reference{display:none;width:150px;max-height:130px;object-fit:contain;border:1px solid #458772;border-radius:10px;background:#000;margin-top:8px}
     #mission-phase{text-transform:uppercase;font-size:1.12rem;font-weight:800}.button-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    details{margin-top:12px}summary{cursor:pointer;font-weight:800}code{overflow-wrap:anywhere}
+    #voice-state{font-size:1.12rem;font-weight:800}.voice-command{font-size:1.2rem;color:#55f09a;margin:.55rem 0}.voice-live{min-height:1.5em;font-size:1.35rem;font-weight:800;color:#fff;margin:.55rem 0}.voice-controls{display:flex;gap:8px;flex-wrap:wrap}.voice-controls button{flex:1}
+    details{margin-top:12px}summary{cursor:pointer;font-weight:800}code{overflow-wrap:anywhere}input[type=range]{width:min(520px,100%)}output{font-weight:800;color:#55f09a}
   </style>
 </head>
 <body>
@@ -31,6 +32,20 @@
   </header>
   <figure><img id="camera" src="/camera-stream.mjpg" alt="Woof low-latency camera"><canvas id="camera-overlay" aria-hidden="true"></canvas></figure>
   <div class="grid">
+    <section class="panel">
+      <b>Voice mission</b>
+      <p class="voice-command">Say: “Find the apple”</p>
+      <p class="muted">Also accepts banana or pear. A committed command makes Woof bark, run the guarded turn and search, approach the class, use the stock paw gesture, and return to the captured start pose.</p>
+      <div id="voice-state" class="bad">VOICE SERVICE CONNECTING</div>
+      <p id="voice-live" class="voice-live">Listening for speech…</p>
+      <p id="voice-heard" class="muted">Nothing heard yet.</p>
+      <p id="voice-detail" class="muted">Waiting for microphone telemetry.</p>
+      <div class="voice-controls">
+        <button id="voice-start" type="button">START LISTENING</button>
+        <button id="voice-stop" type="button">STOP LISTENING</button>
+        <button id="voice-bark" type="button">TEST BARK</button>
+      </div>
+    </section>
     <section class="panel">
       <b>1. Show Woof one fruit</b>
       <p class="muted">Show Woof one fruit and press Save Class. Woof saves its YOLO label, then acknowledges it with the stock paw-forward Hello gesture.</p>
@@ -55,6 +70,14 @@
       <div class="button-row"><button id="stop">STOP NOW</button></div>
     </section>
   </div>
+  <details open>
+    <summary>Touch-range calibration</summary>
+    <p class="muted">After the fruit disappears at the bottom camera edge, Woof uses local odometry to travel exactly this much farther. Start at 10 cm; adjust only after measuring the remaining paw-to-fruit gap.</p>
+    <label for="final-distance">Extra measured travel: <output id="final-distance-value">10 cm</output></label>
+    <p><input id="final-distance" type="range" min="2" max="30" step="1" value="10"></p>
+    <button id="save-calibration" type="button">APPLY TOUCH RANGE</button>
+    <p id="calibration-status" class="muted">Waiting for final-approach telemetry.</p>
+  </details>
   <details>
     <summary>Manual follower fallback</summary>
     <p class="muted">The validated click-to-follow path remains available independently of the memory demo.</p>
@@ -64,8 +87,9 @@
     <p><button id="follow" disabled>FOLLOW SELECTED FRUIT</button></p>
   </details>
   <script>
-    const live=document.querySelector('#live'),camera=document.querySelector('#camera'),cameraOverlay=document.querySelector('#camera-overlay'),target=document.querySelector('#target'),command=document.querySelector('#command'),monitor=document.querySelector('#monitor'),produce=document.querySelector('#produce'),produceMeta=document.querySelector('#produce-meta'),targetFeedback=document.querySelector('#target-feedback'),follow=document.querySelector('#follow'),stop=document.querySelector('#stop'),run=document.querySelector('#run'),go=document.querySelector('#go'),reset=document.querySelector('#reset'),reload=document.querySelector('#reload'),memoryView=document.querySelector('#memory'),reference=document.querySelector('#reference'),missionPhase=document.querySelector('#mission-phase'),missionView=document.querySelector('#mission'),matchView=document.querySelector('#match');
-    let following=false,demoActive=false,startingFollow=false,startingDemo=false,sendingGo=false,capturing=false,resetting=false,refreshInFlight=false,stopPromise=null,memoryId=null,roundId=null,uiRoundGeneration=0;
+    const live=document.querySelector('#live'),camera=document.querySelector('#camera'),cameraOverlay=document.querySelector('#camera-overlay'),target=document.querySelector('#target'),command=document.querySelector('#command'),monitor=document.querySelector('#monitor'),produce=document.querySelector('#produce'),produceMeta=document.querySelector('#produce-meta'),targetFeedback=document.querySelector('#target-feedback'),follow=document.querySelector('#follow'),stop=document.querySelector('#stop'),run=document.querySelector('#run'),go=document.querySelector('#go'),reset=document.querySelector('#reset'),reload=document.querySelector('#reload'),memoryView=document.querySelector('#memory'),reference=document.querySelector('#reference'),missionPhase=document.querySelector('#mission-phase'),missionView=document.querySelector('#mission'),matchView=document.querySelector('#match'),finalDistance=document.querySelector('#final-distance'),finalDistanceValue=document.querySelector('#final-distance-value'),saveCalibration=document.querySelector('#save-calibration'),calibrationStatus=document.querySelector('#calibration-status'),voiceState=document.querySelector('#voice-state'),voiceLive=document.querySelector('#voice-live'),voiceHeard=document.querySelector('#voice-heard'),voiceDetail=document.querySelector('#voice-detail'),voiceStart=document.querySelector('#voice-start'),voiceStop=document.querySelector('#voice-stop'),voiceBark=document.querySelector('#voice-bark');
+    let following=false,demoActive=false,startingFollow=false,startingDemo=false,sendingGo=false,capturing=false,resetting=false,refreshInFlight=false,voiceRefreshInFlight=false,voiceActionInFlight=false,stopPromise=null,memoryId=null,roundId=null,uiRoundGeneration=0,calibrationDirty=false,savingCalibration=false;
+    const voiceOrigin=`${location.protocol}//${location.hostname}:8098`;
     async function api(path,body){const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok){const e=await r.json();throw new Error(e.detail||r.statusText)}return r.json()}
     async function remove(path){const r=await fetch(path,{method:'DELETE'});if(!r.ok){const e=await r.json();throw new Error(e.detail||r.statusText)}return r.json()}
     function closestSelectedIndex(detections,name,hint){
@@ -104,9 +128,11 @@
       const stretch=m.match_stretch_status&&m.match_stretch_status!=='not_requested'?` · stretch ${m.match_stretch_status}`:'',arrival=m.arrival_hello_status&&m.arrival_hello_status!=='not_requested'?` · arrival paw ${m.arrival_hello_status}`:'',returnState=m.return_home_enabled?` · home ${m.return_home_status}${m.return_distance_m===null||m.return_distance_m===undefined?'':` ${Number(m.return_distance_m).toFixed(2)}m away`}`:'';
       const search=m.phase==='searching'?` · search ${m.search_progress_deg??0}°/${m.search_sweep_deg??0}° at ${Number(m.search_rate_rps??0).toFixed(2)} rad/s`:'';
       missionView.textContent=`${m.reason||m.readiness||'idle'}${stretch}${arrival}${returnState} · turn ${m.turn_progress_deg??0}° at ${Number(m.turn_rate_rps??0).toFixed(2)} rad/s (${m.direct_turn_enabled?'direct yaw':'avoidance'})${search} · confirmations ${m.match_confirmations??0} · pose ${m.heading?.pose_healthy?'fresh':'unavailable'}`;
+      if(!calibrationDirty&&!savingCalibration&&Number.isFinite(m.final_approach_distance_m)){const cm=Math.round(m.final_approach_distance_m*100);finalDistance.value=cm;finalDistanceValue.textContent=`${cm} cm`}
+      saveCalibration.disabled=Boolean(m.active)||following||resetting||savingCalibration;calibrationStatus.textContent=`final approach ${m.final_approach_status||'not requested'} · measured ${Number(m.final_approach_measured_distance_m??0).toFixed(2)} m · commanded estimate ${Number(m.final_approach_commanded_distance_m??0).toFixed(2)} m`;
       run.textContent=m.active?`${(m.phase||'running').toUpperCase()}…`:saved?`FIND THIS ${saved.label.toUpperCase()} & RETURN`:'RUN REMEMBER & FIND';run.disabled=resetting||startingDemo||m.active||!m.can_start;run.title=m.readiness||'';
       go.textContent=sendingGo?'SENDING GO…':m.phase==='waiting_for_go'?'GO TO FRUIT':'WAITING FOR CLASS';go.disabled=resetting||sendingGo||!m.can_go;go.title=m.go_readiness||'';
-      if(saved){memoryView.textContent=`Saved class: ${saved.label}`;memoryView.className='good';if(memoryId!==saved.id){memoryId=saved.id;reference.src=`/api/memory/reference.jpg?t=${encodeURIComponent(saved.id)}`;reference.style.display='block'}}
+      if(saved){memoryView.textContent=`Saved class: ${saved.label}`;memoryView.className='good';if(memoryId!==saved.id){memoryId=saved.id;if(saved.has_reference){reference.src=`/api/memory/reference.jpg?t=${encodeURIComponent(saved.id)}`;reference.style.display='block'}else{reference.removeAttribute('src');reference.style.display='none'}}}
       else{memoryId=null;memoryView.textContent='No class saved';memoryView.className='bad';reference.removeAttribute('src');reference.style.display='none'}
       matchView.textContent=best?`${best.label} class locked · YOLO ${(best.detector_confidence*100).toFixed(1)}% · ${last.candidate_count} candidate${last.candidate_count===1?'':'s'}`:'No saved-class detection yet';
     }
@@ -119,16 +145,34 @@
         renderProduce(s.produce,selected,s.selected_target_hint);renderOverlay(s);renderMission(s);updateFollowButton(Boolean(s.can_follow),s.follow_readiness||'');
       }catch(e){live.textContent='APP UNAVAILABLE';live.className='pill bad'}finally{refreshInFlight=false}
     }
+    async function voiceApi(path){const r=await fetch(`${voiceOrigin}${path}`,{method:'POST'});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail||data.error||r.statusText);return data}
+    function renderVoice(s){
+      const listening=Boolean(s.listening),scribe=Boolean(s.scribe_connected),micFresh=Number.isFinite(s.mic_age_s)&&s.mic_age_s<1,healthy=Boolean(s.credential_configured&&(s.input_ready??(s.webrtc_connected&&micFresh)));
+      voiceState.textContent=!healthy?'VOICE NOT READY':listening&&scribe&&micFresh?'LISTENING':'VOICE CONNECTING';
+      voiceState.className=healthy&&(!listening||(scribe&&micFresh))?'good':'bad';
+      voiceLive.textContent=s.last_partial?`“${s.last_partial}”`:listening?'Listening for speech…':'Listening paused.';
+      voiceHeard.textContent=s.last_heard?`Heard: “${s.last_heard}”${s.last_target?` · target ${s.last_target}`:''}`:'Nothing heard yet.';
+      voiceDetail.textContent=`${s.last_event||'starting'} · source ${s.mic_source||'Go2'} · mic ${s.mic_frames??0} frames / age ${s.mic_age_s??'—'}s · Scribe ${scribe?'connected':'offline'}${s.last_spoken?` · speaker “${s.last_spoken}”`:''}${s.last_error?` · ${s.last_error}`:''}`;
+      voiceStart.disabled=voiceActionInFlight||listening;voiceStop.disabled=voiceActionInFlight||!listening;voiceBark.disabled=voiceActionInFlight||!s.webrtc_connected;
+    }
+    async function refreshVoice(){
+      if(voiceRefreshInFlight)return;voiceRefreshInFlight=true;
+      try{const s=await fetch(`${voiceOrigin}/api/status`,{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(r.statusText);return r.json()});renderVoice(s)}
+      catch(e){voiceState.textContent='VOICE SERVICE UNAVAILABLE';voiceState.className='bad';voiceDetail.textContent=e.message;voiceStart.disabled=true;voiceStop.disabled=true;voiceBark.disabled=true}
+      finally{voiceRefreshInFlight=false}
+    }
+    async function voiceAction(path){if(voiceActionInFlight)return;voiceActionInFlight=true;try{renderVoice(await voiceApi(path))}catch(e){voiceDetail.textContent=e.message}finally{voiceActionInFlight=false;await refreshVoice()}}
     async function rememberFruit(name,center){if(capturing||!roundId)return;const requestGeneration=uiRoundGeneration;capturing=true;targetFeedback.textContent=`Saving class ${name}…`;try{const s=await api('/api/memory/capture',{target:name,center,round_id:roundId});if(requestGeneration!==uiRoundGeneration)return;const hello=s.mission?.initial_hello_status;if(hello==='complete')targetFeedback.textContent=`Class ${name} saved. Woof acknowledged it with a paw. Place a ${name} behind Woof.`;else if(hello==='failed')targetFeedback.textContent=`Class ${name} was saved, but the Hello gesture failed: ${s.mission?.initial_hello_error||'unknown SDK error'}`;else targetFeedback.textContent=`Class ${name} saved. Place a ${name} behind Woof.`}catch(e){if(requestGeneration===uiRoundGeneration)targetFeedback.textContent=e.message}finally{if(requestGeneration===uiRoundGeneration){capturing=false;await refresh()}}}
     async function chooseTarget(name,center){following=false;startingFollow=false;try{await api('/api/target',{target:name,center});targetFeedback.textContent=`${name} selected for manual fallback.`;await refresh()}catch(e){targetFeedback.textContent=e.message}}
     async function stopMotion(){if(!stopPromise)stopPromise=api('/api/stop').catch(()=>{}).finally(()=>{stopPromise=null});return stopPromise}
     async function beginDemo(){if(startingDemo)return;startingDemo=true;try{await api('/api/demo/start',{confirmation:'TARGET SAVED AND AREA CLEAR'});targetFeedback.textContent='Demo active: Woof will turn and find the saved fruit, then wait for Go.'}catch(e){targetFeedback.textContent=e.message}finally{startingDemo=false;await refresh()}}
     async function approveGo(){if(sendingGo)return;sendingGo=true;go.disabled=true;try{await api('/api/demo/go',{confirmation:'CLASS LOCKED AND PATH CLEAR'});targetFeedback.textContent='Go accepted. Woof is rechecking the saved fruit class before approaching.'}catch(e){targetFeedback.textContent=e.message}finally{sendingGo=false;await refresh()}}
     async function beginFollow(){if(following||startingFollow)return;startingFollow=true;updateFollowButton(false,'starting');try{const s=await api('/api/follow',{confirmation:'TARGET AND PATH CLEAR'});following=Boolean(s.follow_active);targetFeedback.textContent='Robot-side follow is active. Press Stop Now to stop early.'}catch(e){if(startingFollow)targetFeedback.textContent=e.message}finally{startingFollow=false;await refresh()}}
+    async function applyCalibration(){if(savingCalibration)return;savingCalibration=true;saveCalibration.disabled=true;const cm=Number(finalDistance.value);try{await api('/api/calibration/final-approach',{distance_m:cm/100});calibrationDirty=false;calibrationStatus.textContent=`Touch range set to ${cm} cm.`}catch(e){calibrationStatus.textContent=e.message}finally{savingCalibration=false;await refresh()}}
     async function resetRound(){if(resetting)return;resetting=true;uiRoundGeneration+=1;following=false;demoActive=false;startingFollow=false;startingDemo=false;sendingGo=false;capturing=false;memoryId=null;roundId=null;reset.disabled=true;reset.textContent='STOPPING & RESETTING EVERYTHING…';targetFeedback.textContent='Stopping Woof and resetting the complete demo…';try{const s=await api('/api/round/reset');roundId=s.round_id||null;targetFeedback.textContent='New round ready. Show Woof a fruit and press Save Class.'}catch(e){targetFeedback.textContent=e.message}finally{resetting=false;reset.disabled=false;reset.textContent='START OVER (FULL RESET)';await refresh()}}
     function endFollow(){const shouldStop=following||demoActive||startingFollow||startingDemo||sendingGo;following=false;demoActive=false;startingFollow=false;startingDemo=false;sendingGo=false;if(shouldStop)fetch('/api/stop',{method:'POST',keepalive:true}).catch(()=>{})}
     async function emergencyStop(){following=false;demoActive=false;startingFollow=false;startingDemo=false;sendingGo=false;await stopMotion();targetFeedback.textContent='Stopped.';await refresh()}
-    camera.onerror=()=>setTimeout(()=>{camera.src=`/camera-stream.mjpg?t=${Date.now()}`},500);follow.onclick=beginFollow;run.onclick=beginDemo;go.onclick=approveGo;reset.onclick=resetRound;reload.onclick=()=>window.location.reload();window.addEventListener('pagehide',endFollow);stop.onclick=emergencyStop;refresh();setInterval(refresh,250);
+    finalDistance.oninput=()=>{calibrationDirty=true;finalDistanceValue.textContent=`${finalDistance.value} cm`};saveCalibration.onclick=applyCalibration;camera.onerror=()=>setTimeout(()=>{camera.src=`/camera-stream.mjpg?t=${Date.now()}`},500);follow.onclick=beginFollow;run.onclick=beginDemo;go.onclick=approveGo;reset.onclick=resetRound;reload.onclick=()=>window.location.reload();voiceStart.onclick=()=>voiceAction('/api/listen/start');voiceStop.onclick=()=>voiceAction('/api/listen/stop');voiceBark.onclick=()=>voiceAction('/api/bark');window.addEventListener('pagehide',endFollow);stop.onclick=emergencyStop;refresh();refreshVoice();setInterval(refresh,250);setInterval(refreshVoice,500);
   </script>
 </body>
 </html>

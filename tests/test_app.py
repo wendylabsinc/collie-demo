@@ -78,9 +78,53 @@ class FakeRuntime:
     async def stop_demo(self) -> dict[str, object]:
         return {"mission": {"active": False}}
 
+    async def set_final_approach_distance(
+        self, distance_m: float
+    ) -> dict[str, object]:
+        if not 0.02 <= distance_m <= 0.30:
+            from collie_demo.runtime import RuntimeCommandError
+
+            raise RuntimeCommandError(
+                "final approach distance must be between 0.02 and 0.30 m"
+            )
+        return {"mission": {"config": {"final_approach_distance_m": distance_m}}}
+
     async def approve_demo_go(self, confirmation: str) -> dict[str, object]:
         return {
             "mission": {"active": True, "phase": "confirming"},
+            "confirmation": confirmation,
+        }
+
+    async def record_voice_event(
+        self,
+        *,
+        event: str,
+        transcript: str = "",
+        target: str | None = None,
+        error: str = "",
+    ) -> dict[str, object]:
+        return {
+            "voice": {
+                "last_event": event,
+                "last_heard": transcript,
+                "last_target": target,
+                "error": error,
+            }
+        }
+
+    async def start_voice_mission(
+        self,
+        target: str,
+        transcript: str,
+        confirmation: str,
+    ) -> dict[str, object]:
+        return {
+            "memory": {"label": target},
+            "voice": {
+                "last_heard": transcript,
+                "last_target": target,
+                "mission_active": True,
+            },
             "confirmation": confirmation,
         }
 
@@ -192,3 +236,59 @@ def test_memory_and_demo_endpoints_are_local_and_explicit(tmp_path: Path) -> Non
         assert reset.status_code == 200
         assert reset.json()["round_id"] == "round-2"
         assert client.delete("/api/memory").json()["memory"] is None
+
+
+def test_final_approach_calibration_is_bounded(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("ok")
+    runtime = FakeRuntime()
+
+    with TestClient(create_app(runtime, tmp_path)) as client:  # type: ignore[arg-type]
+        calibrated = client.post(
+            "/api/calibration/final-approach",
+            json={"distance_m": 0.12},
+        )
+        assert calibrated.status_code == 200
+        assert (
+            calibrated.json()["mission"]["config"]["final_approach_distance_m"]
+            == 0.12
+        )
+        assert client.post(
+            "/api/calibration/final-approach",
+            json={"distance_m": 0.31},
+        ).status_code == 409
+
+
+def test_voice_service_can_report_and_start_an_allowlisted_mission(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.html").write_text("ok")
+    runtime = FakeRuntime()
+
+    with TestClient(create_app(runtime, tmp_path)) as client:  # type: ignore[arg-type]
+        event = client.post(
+            "/api/voice/event",
+            json={
+                "event": "committed_transcript",
+                "transcript": "Find the apple",
+                "target": "apple",
+            },
+        )
+        assert event.status_code == 200
+        assert event.json()["voice"]["last_heard"] == "Find the apple"
+
+        mission = client.post(
+            "/api/voice/mission",
+            json={
+                "target": "apple",
+                "transcript": "Find the apple",
+                "confirmation": "VOICE COMMAND HEARD",
+            },
+        )
+        assert mission.status_code == 200
+        assert mission.json()["memory"]["label"] == "apple"
+        assert mission.json()["voice"]["mission_active"] is True
+
+        assert client.post(
+            "/api/voice/mission",
+            json={"target": "apple", "transcript": "Find the apple"},
+        ).status_code == 422

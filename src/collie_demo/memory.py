@@ -46,6 +46,7 @@ class FruitMemory:
             "role": "target_class",
             "age_s": round(max(0.0, current - self.created_monotonic_s), 3),
             "reference_bbox_xyxy": self.reference_bbox_xyxy,
+            "has_reference": bool(self.reference_jpeg),
         }
 
 
