@@ -14,6 +14,7 @@ class FakeSport:
         self.balance_stand_calls = 0
         self.hello_calls = 0
         self.stretch_calls = 0
+        self.standdown_calls = 0
         self.timeout_s: float | None = None
         self.moves: list[tuple[float, float, float]] = []
         self.current_move = (0.0, 0.0, 0.0)
@@ -29,6 +30,9 @@ class FakeSport:
         return 0
     def Hello(self) -> int:
         self.hello_calls += 1
+        return 0
+    def StandDown(self) -> int:
+        self.standdown_calls += 1
         return 0
     def Stretch(self) -> int:
         self.stretch_calls += 1
@@ -250,6 +254,28 @@ def test_hello_uses_stock_skill_while_motion_remains_disarmed() -> None:
         assert avoidance.remote is False
         assert motion.armed is False
         assert motion.status()["last_command"]["reason"] == "hello_gesture_complete"
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_standdown_prepares_the_pointing_pose_while_motion_is_disarmed() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+
+        await motion.perform_standdown(settle_s=0.0)
+
+        assert sport.standdown_calls == 1
+        assert sport.stop_calls == 1
+        assert avoidance.enabled is False
+        assert avoidance.remote is False
+        assert motion.armed is False
+        assert (
+            motion.status()["last_command"]["reason"]
+            == "pointing_standdown_complete"
+        )
         await motion.close()
 
     asyncio.run(scenario())

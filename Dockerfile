@@ -134,6 +134,14 @@ ENV WENDY_PLATFORM=nvidia-jetson \
     COLLIE_MATCH_REACQUIRE_TIMEOUT_S=3.0 \
     COLLIE_ARRIVAL_HELLO_ENABLED=1 \
     COLLIE_ARRIVAL_HELLO_SETTLE_S=0.35 \
+    COLLIE_POINTING_ENABLED=1 \
+    COLLIE_POINTING_POLICY=/app/models/pointing/policy_actor_42500.jit \
+    COLLIE_POINTING_STATUS_URL=http://127.0.0.1:8096/api/status \
+    COLLIE_POINTING_DURATION_S=1.0 \
+    COLLIE_POINTING_ACTION_GAIN=1.0 \
+    COLLIE_POINTING_MAX_RATE_RAD_S=0.60 \
+    COLLIE_POINTING_KP=25.0 \
+    COLLIE_POINTING_KD=0.5 \
     COLLIE_RETURN_HOME_ENABLED=1 \
     COLLIE_RETURN_ARRIVAL_TOLERANCE_M=0.25 \
     COLLIE_RETURN_HEADING_TOLERANCE_DEG=10 \
@@ -175,6 +183,7 @@ WORKDIR /app
 COPY web/ web/
 COPY models/collie/collie-fruit-yoloe11m.pt models/collie/collie-fruit-yoloe11m.pt
 COPY models/collie/collie-fruit-yoloe11m.engine models/collie/collie-fruit-yoloe11m.engine
+COPY models/pointing/policy_actor_42500.jit models/pointing/policy_actor_42500.jit
 ENV COLLIE_PRODUCE_CLASS_THRESHOLDS="apple=0.70,banana=0.20,pear=0.70"
 
 EXPOSE 8096

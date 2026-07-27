@@ -172,6 +172,24 @@ def create_app(runtime: CollieRuntime, web_directory: Path) -> FastAPI:
     async def stop_demo() -> dict[str, object]:
         return await runtime.stop_demo()
 
+    @app.post("/api/pointing/prepare")
+    async def prepare_pointing(request: ArmRequest) -> dict[str, object]:
+        try:
+            return await runtime.prepare_pointing(request.confirmation)
+        except RuntimeCommandError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/pointing/run")
+    async def run_pointing(request: ArmRequest) -> dict[str, object]:
+        try:
+            return await runtime.start_pointing(request.confirmation)
+        except RuntimeCommandError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/pointing/stop")
+    async def stop_pointing() -> dict[str, object]:
+        return await runtime.stop_pointing()
+
     @app.post("/api/calibration/final-approach")
     async def calibrate_final_approach(
         request: FinalApproachCalibrationRequest,

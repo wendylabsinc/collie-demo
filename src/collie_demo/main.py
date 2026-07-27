@@ -13,6 +13,7 @@ from .fruit import FruitDetector
 from .heading import SportModeHeadingProvider
 from .mission import MissionConfig
 from .motion import MotionConfig, create_motion, initialize_dds
+from .pointing import PointingPolicyConfig, PointingPolicyManager
 from .runtime import CollieRuntime
 
 
@@ -187,11 +188,39 @@ def build_runtime() -> CollieRuntime:
         if motion_enabled
         else None
     )
+    pointing = PointingPolicyManager(
+        PointingPolicyConfig(
+            enabled=env_bool("COLLIE_POINTING_ENABLED"),
+            policy_path=Path(
+                os.environ.get(
+                    "COLLIE_POINTING_POLICY",
+                    "models/pointing/policy_actor_42500.jit",
+                )
+            ),
+            network_interface=network_interface or "enP8p1s0",
+            status_url=os.environ.get(
+                "COLLIE_POINTING_STATUS_URL",
+                "http://127.0.0.1:8096/api/status",
+            ),
+            duration_s=float(
+                os.environ.get("COLLIE_POINTING_DURATION_S", "1.0")
+            ),
+            action_gain=float(
+                os.environ.get("COLLIE_POINTING_ACTION_GAIN", "1.0")
+            ),
+            maximum_target_rate_rad_s=float(
+                os.environ.get("COLLIE_POINTING_MAX_RATE_RAD_S", "0.60")
+            ),
+            kp=float(os.environ.get("COLLIE_POINTING_KP", "25.0")),
+            kd=float(os.environ.get("COLLIE_POINTING_KD", "0.5")),
+        )
+    )
     return CollieRuntime(
         camera=create_camera(),
         controller=ApproachController(controller_config),
         motion=motion,
         motion_enabled=motion_enabled,
+        pointing=pointing,
         allow_unranged_forward=allow_unranged,
         produce_detector=FruitDetector(
             produce_model,

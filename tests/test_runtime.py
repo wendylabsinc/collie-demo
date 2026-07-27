@@ -287,6 +287,51 @@ class FailingStretchSport(FakeSport):
         return 3104
 
 
+class FakePointingPolicy:
+    def __init__(self) -> None:
+        self.available = True
+        self.active = False
+        self.prepared = False
+        self.started: tuple[str, float] | None = None
+
+    def mark_prepared(self) -> None:
+        self.prepared = True
+
+    def clear_prepared(self) -> None:
+        self.prepared = False
+
+    def status(self) -> dict[str, object]:
+        return {
+            "available": self.available,
+            "enabled": True,
+            "active": self.active,
+            "prepared": self.prepared,
+            "phase": (
+                "running" if self.active else "prepared" if self.prepared else "idle"
+            ),
+            "duration_s": 1.0,
+            "error": None,
+            "last_report": None,
+        }
+
+    async def start(
+        self, *, target_label: str, minimum_confidence: float
+    ) -> dict[str, object]:
+        if not self.prepared:
+            raise AssertionError("pointing started without StandDown preparation")
+        self.started = (target_label, minimum_confidence)
+        self.active = True
+        return self.status()
+
+    async def stop(self) -> dict[str, object]:
+        self.active = False
+        self.prepared = False
+        return self.status()
+
+    async def close(self) -> None:
+        await self.stop()
+
+
 def test_runtime_requires_confirmation_then_pulses_forward() -> None:
     async def scenario() -> None:
         avoidance = FakeAvoidance()
@@ -358,6 +403,66 @@ def test_runtime_requires_confirmation_then_pulses_forward() -> None:
                 pass
             else:
                 raise AssertionError("invalid target color was accepted")
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_pointing_ui_flow_prepares_locks_and_stops_one_motion_owner() -> None:
+    async def scenario() -> None:
+        sport = FakeSport()
+        pointing = FakePointingPolicy()
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, FakeAvoidance()),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=FakeProduceDetector(),
+            loop_hz=60.0,
+            pointing=pointing,  # type: ignore[arg-type]
+        )
+        await runtime.start()
+        try:
+            for _ in range(100):
+                status = await runtime.status()
+                if status["produce"]["detections"]:
+                    break
+                await asyncio.sleep(0.01)
+            await runtime.select_target("banana", (350, 240))
+            await asyncio.sleep(0.10)
+
+            prepared = await runtime.prepare_pointing(
+                "WOOF IS CLEAR TO LIE DOWN"
+            )
+            assert sport.standdown_calls == 1
+            assert prepared["pointing"]["prepared"] is True
+            for _ in range(100):
+                prepared = await runtime.status()
+                if prepared["pointing"]["can_run"]:
+                    break
+                await asyncio.sleep(0.01)
+            assert prepared["pointing"]["can_run"] is True
+
+            started = await runtime.start_pointing(
+                "WOOF IS LYING DOWN AND TARGET AREA IS CLEAR"
+            )
+            assert pointing.started == ("banana", 0.5)
+            assert started["pointing"]["active"] is True
+            assert started["motion_owner"] == "pointing"
+            assert started["can_follow"] is False
+
+            try:
+                await runtime.select_target("apple", (140, 250))
+            except RuntimeCommandError as exc:
+                assert "pointing policy owns motion" in str(exc)
+            else:
+                raise AssertionError("target lock changed during low-level control")
+
+            stopped = await runtime.stop_pointing()
+            assert stopped["pointing"]["active"] is False
+            assert stopped["motion_owner"] is None
         finally:
             await runtime.close()
 

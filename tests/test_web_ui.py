@@ -96,7 +96,7 @@ def test_memory_demo_ui_keeps_stop_and_manual_fallback() -> None:
     assert "FIND A DIFFERENT" not in html
     assert "Fruit to reject" not in html
     assert 'id="stop"' in html
-    assert "following||demoActive||startingFollow||startingDemo" in html
+    assert "following||demoActive||pointingActive||startingFollow" in html
 
 
 def test_touch_range_is_calibrated_as_measured_distance() -> None:
@@ -130,3 +130,18 @@ def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
     assert "voiceStart.onclick" in html
     assert "voiceStop.onclick" in html
     assert "voiceBark.onclick" in html
+
+
+def test_live_pointing_ui_requires_standdown_and_keeps_guarded_stop() -> None:
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+
+    assert "Show the real pointing policy" in html
+    assert 'id="pointing-prepare"' in html
+    assert 'id="pointing-run"' in html
+    assert 'id="pointing-stop"' in html
+    assert "WOOF IS CLEAR TO LIE DOWN" in html
+    assert "WOOF IS LYING DOWN AND TARGET AREA IS CLEAR" in html
+    assert "await api(path,confirmation?{confirmation}:undefined)" in html
+    assert "renderPointing(s)" in html
+    assert "There is no bypass button." in html
+    assert "--bypass-roll-guard" not in html

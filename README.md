@@ -20,6 +20,21 @@ fruit inference remain on Woof.
 - Bundles the local PyTorch source checkpoint and Woof-specific TensorRT FP16
   engine; runtime inference does not call a hosted API.
 - Detects only the three visual-prompt classes: apple, banana, and pear.
+- Bundles the hash-pinned iteration-42,500 TorchScript pointing actor and
+  exposes a guarded browser flow: manually select a fresh fruit box, request
+  Unitree `StandDown`, then run one second of the real full-gain policy. The
+  actor receives the exact normalized selected `xyxy` box plus live Go2
+  proprioception; it cannot silently switch to another detection.
+- Keeps the pointing runner behind the same single-motion-owner boundary as
+  following and navigation. The UI exposes Stop, target changes are rejected
+  during low-level control, target loss aborts, and every exit path attempts to
+  return to the captured StandDown pose and restore Sport mode.
+- Retains the 0.30 rad roll, 0.35 rad pitch, 12-unit estimated-torque,
+  2 rad/s joint-speed, 0.60 rad/s target-rate, low-state freshness, policy
+  checksum, unchanged target-lock, and 800 ms bbox-age guards. The stage runner
+  contains no roll-guard bypass. The visible full-gain segment is capped at one
+  second because the earlier three-second hardware test reached the roll guard
+  after 67 policy ticks.
 - Runs a separate persistent Go2 WebRTC microphone service on port 8098. It
   accepts only deterministic `Find [the] apple|banana|pear` commands plus
   `stop|abort|cancel`; arbitrary transcripts can never become motor commands.
@@ -165,6 +180,35 @@ fruit inference remain on Woof.
 Every class emitted by the local model is selectable from the detection list.
 Whale color detection and whale motion targets have been removed.
 
+## Live pointing policy
+
+Open the main UI and use the `Show the real pointing policy` panel:
+
+1. Click `Manual Select` on the fruit whose bounding box should drive the paw.
+2. Clear the robot and target area, then click `Lay Woof Down`.
+3. Wait for the camera and selected box to settle. The Run button remains
+   disabled until the target is stable, freshly YOLO-verified, and above its
+   configured class threshold.
+4. Click `Run 1.0s Point`. The endpoint returns immediately while the robot
+   process runs the 50 Hz actor and 500 Hz low-level publisher.
+5. Use either `Stop & Restore Sport Mode` or the global `Stop Now`. Stop sends
+   an interrupt to the policy runner and waits for its guarded joint return and
+   Sport-controller restoration; it never force-kills the motor owner.
+
+The policy endpoints are:
+
+```text
+POST /api/pointing/prepare
+POST /api/pointing/run
+POST /api/pointing/stop
+```
+
+`/api/status` reports the policy phase, readiness, target label, guard limits,
+last safety report, peak roll/speed/torque, confidence range, policy ticks, and
+whether Sport mode was restored. The browser supplies explicit confirmation
+phrases for the two physical steps; direct API callers must supply the same
+phrases.
+
 ## Model
 
 Download the official YOLOE base checkpoint, capture a clean reference frame,
@@ -188,8 +232,11 @@ python tools/build_visual_prompt_weights.py \
 
 The current baked checkpoint is 59,997,395 bytes with SHA-256
 `7c75fcc5d449a8b00785dfd0c955cbf11bd6bde6a5ede1ea8d34c097413bc53e`.
-Model files and camera captures are excluded from Git, but the Docker build
-context includes the baked checkpoint.
+Detector model files and camera captures are excluded from Git, but the Docker
+build context includes the baked detector checkpoint. The 454 KiB pointing
+actor is intentionally committed at
+`models/pointing/policy_actor_42500.jit`; startup rejects it unless its SHA-256
+is `5ac866353150b82309a083827aefd2f43e779a5ba67c8d617a5b612b89fe1938`.
 
 ## Local test
 

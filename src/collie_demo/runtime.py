@@ -17,6 +17,12 @@ from .matcher import ClassCandidate, ClassMatchResult, FruitClassMatcher
 from .memory import FruitMemory, crop_bbox, encode_jpeg
 from .mission import MissionConfig, MissionPhase, MissionTelemetry
 from .motion import MotionError, MotionNotReady, UnitreeMotionAdapter
+from .pointing import (
+    POINTING_PREPARE_CONFIRMATION,
+    POINTING_RUN_CONFIRMATION,
+    PointingPolicyError,
+    PointingPolicyManager,
+)
 from .types import CameraFrame, TargetObservation, VelocityCommand
 
 
@@ -126,6 +132,7 @@ class CollieRuntime:
         class_matcher: FruitClassMatcher | None = None,
         heading_provider: HeadingProviderProtocol | None = None,
         mission_config: MissionConfig | None = None,
+        pointing: PointingPolicyManager | None = None,
     ) -> None:
         self.camera = camera
         self.controller = controller
@@ -171,12 +178,16 @@ class CollieRuntime:
         self.class_matcher = class_matcher or FruitClassMatcher()
         self.heading_provider = heading_provider
         self.mission_config = mission_config or MissionConfig()
+        self.pointing = pointing
         self._final_approach_distance_m = (
             self.mission_config.final_approach_distance_m
         )
         self._state_lock = asyncio.Lock()
         self._stream_condition = asyncio.Condition()
         self._action_lock = asyncio.Lock()
+        # Serializes long stock gestures/capture with the low-level pointing
+        # handoff. A memory-save Hello must never race policy startup.
+        self._exclusive_skill_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._produce_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -289,6 +300,8 @@ class CollieRuntime:
             except asyncio.CancelledError:
                 pass
             self._navigation_watchdog_task = None
+        if self.pointing is not None:
+            await self.pointing.close()
         await self.stop("shutdown")
         if self.motion is not None:
             await self.motion.close()
@@ -297,6 +310,7 @@ class CollieRuntime:
 
     async def arm(self, confirmation: str) -> dict[str, object]:
         async with self._action_lock:
+            self._require_pointing_idle()
             if confirmation.strip().upper() != ARM_CONFIRMATION:
                 raise RuntimeCommandError(f'type exactly "{ARM_CONFIRMATION}"')
             if not self.motion_enabled or self.motion is None:
@@ -323,6 +337,7 @@ class CollieRuntime:
         """Acquire the factory-avoidance lease for map navigation only."""
 
         async with self._action_lock:
+            self._require_pointing_idle()
             if confirmation.strip().upper() != NAVIGATION_ARM_CONFIRMATION:
                 raise RuntimeCommandError(
                     f'type exactly "{NAVIGATION_ARM_CONFIRMATION}"'
@@ -386,6 +401,7 @@ class CollieRuntime:
         """Acquire the private yaw-only SportClient lease for the demo turn."""
 
         async with self._action_lock:
+            self._require_pointing_idle()
             if not self.motion_enabled or self.motion is None:
                 raise RuntimeCommandError("motion backend is disabled")
             if self._lease is not None or self.motion.armed:
@@ -453,6 +469,102 @@ class CollieRuntime:
             "limits": None if motion_status is None else motion_status["limits"],
         }
 
+    async def prepare_pointing(self, confirmation: str) -> dict[str, object]:
+        """Stop every locomotion owner and request Unitree's StandDown pose."""
+
+        async with self._exclusive_skill_lock:
+            return await self._prepare_pointing(confirmation)
+
+    async def _prepare_pointing(self, confirmation: str) -> dict[str, object]:
+        if confirmation.strip().upper() != POINTING_PREPARE_CONFIRMATION:
+            raise RuntimeCommandError(
+                f'type exactly "{POINTING_PREPARE_CONFIRMATION}"'
+            )
+        if self.pointing is None or not self.pointing.available:
+            error = (
+                "pointing policy is unavailable"
+                if self.pointing is None
+                else str(self.pointing.status().get("error") or "unavailable")
+            )
+            raise RuntimeCommandError(error)
+        if self.pointing.active:
+            raise RuntimeCommandError("pointing policy is already active")
+        if not self.motion_enabled or self.motion is None:
+            raise RuntimeCommandError("motion backend is disabled")
+        await self.stop("pointing_prepare")
+        async with self._action_lock:
+            self._require_pointing_idle()
+            try:
+                await self.motion.perform_standdown()
+            except MotionError as exc:
+                self.pointing.clear_prepared()
+                raise RuntimeCommandError(str(exc)) from exc
+            self.pointing.mark_prepared()
+            self._command = VelocityCommand(reason="pointing_standdown_complete")
+        return await self.status()
+
+    async def start_pointing(self, confirmation: str) -> dict[str, object]:
+        """Run the one-second, guarded full policy against the selected bbox."""
+
+        async with self._exclusive_skill_lock:
+            return await self._start_pointing(confirmation)
+
+    async def _start_pointing(self, confirmation: str) -> dict[str, object]:
+        if confirmation.strip().upper() != POINTING_RUN_CONFIRMATION:
+            raise RuntimeCommandError(f'type exactly "{POINTING_RUN_CONFIRMATION}"')
+        if self.pointing is None:
+            raise RuntimeCommandError("pointing policy is unavailable")
+        if not self.motion_enabled or self.motion is None:
+            raise RuntimeCommandError("motion backend is disabled")
+        async with self._action_lock:
+            self._require_pointing_idle()
+            if self._lease is not None or self.motion.armed:
+                raise RuntimeCommandError("motion is already owned; stop it first")
+            if self._mission_task is not None and not self._mission_task.done():
+                raise RuntimeCommandError("stop the fruit mission before pointing")
+            async with self._state_lock:
+                now = time.monotonic()
+                readiness = self._follow_readiness_locked(now)
+                target_label = self._selected_target_name
+                target = self._target
+                default_confidence = (
+                    0.5
+                    if self.produce_detector is None
+                    else float(self.produce_detector.confidence)
+                )
+                class_thresholds = (
+                    {}
+                    if self.produce_detector is None
+                    else getattr(self.produce_detector, "class_thresholds", {})
+                )
+            if readiness is not None:
+                raise RuntimeCommandError(readiness)
+            if target_label is None or target is None or target.confidence is None:
+                raise RuntimeCommandError("selected target has no fresh YOLO confidence")
+            minimum_confidence = float(
+                class_thresholds.get(target_label, default_confidence)
+            )
+            if target.confidence < minimum_confidence:
+                raise RuntimeCommandError(
+                    f"selected {target_label} confidence is "
+                    f"{target.confidence:.2f}; need {minimum_confidence:.2f}"
+                )
+            try:
+                await self.motion.emergency_stop()
+                await self.pointing.start(
+                    target_label=target_label,
+                    minimum_confidence=minimum_confidence,
+                )
+            except (MotionError, PointingPolicyError) as exc:
+                raise RuntimeCommandError(str(exc)) from exc
+            self._command = VelocityCommand(reason="pointing_policy_starting")
+        return await self.status()
+
+    async def stop_pointing(self) -> dict[str, object]:
+        if self.pointing is not None:
+            await self.pointing.stop()
+        return await self.stop("pointing_operator_stop")
+
     async def start_follow(self, confirmation: str) -> dict[str, object]:
         generation = self._follow_start_generation
         deadline = time.monotonic() + self.follow_start_timeout_s
@@ -516,6 +628,7 @@ class CollieRuntime:
         confirmed_visible_frames = max(1, int(confirmed_visible_frames))
         self._follow_start_generation += 1
         async with self._action_lock:
+            self._require_pointing_idle()
             if self.motion is not None and (
                 self._lease is not None or self.motion.armed
             ):
@@ -596,6 +709,21 @@ class CollieRuntime:
         expected_round_id: str | None = None,
     ) -> dict[str, object]:
         """Save a freshly detected YOLO class without arming motion."""
+
+        async with self._exclusive_skill_lock:
+            return await self._remember_target(
+                target_name,
+                preferred_center,
+                expected_round_id,
+            )
+
+    async def _remember_target(
+        self,
+        target_name: str,
+        preferred_center: tuple[int, int] | None = None,
+        expected_round_id: str | None = None,
+    ) -> dict[str, object]:
+        self._require_pointing_idle()
 
         if not self.mission_config.enabled:
             raise RuntimeCommandError("fruit-memory demo is disabled")
@@ -945,6 +1073,7 @@ class CollieRuntime:
                 self._voice_autogo_task = None
 
     async def start_demo(self, confirmation: str) -> dict[str, object]:
+        self._require_pointing_idle()
         if confirmation.strip().upper() != DEMO_CONFIRMATION:
             raise RuntimeCommandError(f'type exactly "{DEMO_CONFIRMATION}"')
         if not self.mission_config.enabled:
@@ -1033,6 +1162,7 @@ class CollieRuntime:
         it can arm the guarded follower.
         """
 
+        self._require_pointing_idle()
         if confirmation.strip().upper() != DEMO_GO_CONFIRMATION:
             raise RuntimeCommandError(f'type exactly "{DEMO_GO_CONFIRMATION}"')
         if self._mission_task is None or self._mission_task.done():
@@ -1076,6 +1206,7 @@ class CollieRuntime:
                 "final approach distance must be between 0.02 and 0.30 m"
             )
         async with self._action_lock:
+            self._require_pointing_idle()
             mission_active = bool(
                 self._mission_task is not None and not self._mission_task.done()
             )
@@ -1144,6 +1275,8 @@ class CollieRuntime:
             return await self.status()
 
     async def stop(self, reason: str = "user_stop") -> dict[str, object]:
+        if self.pointing is not None and self.pointing.active:
+            await self.pointing.stop()
         current_task = asyncio.current_task()
         mission_task = self._mission_task
         # Target-loss stops are the safety brake for an active approach. Keep
@@ -1170,6 +1303,11 @@ class CollieRuntime:
                 self._mission_task = None
         self._follow_start_generation += 1
         async with self._action_lock:
+            # Recheck after acquiring the same lock used by policy startup.
+            # This closes the race where Stop was requested while startup was
+            # between its initial idle check and manager activation.
+            if self.pointing is not None and self.pointing.active:
+                await self.pointing.stop()
             if self.motion is not None:
                 await self.motion.emergency_stop()
             self._lease = None
@@ -1269,6 +1407,9 @@ class CollieRuntime:
                 and motion_status["initialized"]
                 and motion_status["fault"] is None
             )
+            pointing_active = bool(
+                self.pointing is not None and self.pointing.active
+            )
             follow_active = bool(
                 self._follow_task is not None
                 and not self._follow_task.done()
@@ -1279,6 +1420,7 @@ class CollieRuntime:
             follow_readiness = self._follow_readiness_locked(now)
             can_follow = (
                 not follow_active
+                and not pointing_active
                 and follow_readiness is None
                 and motion_ready
             )
@@ -1305,6 +1447,8 @@ class CollieRuntime:
                 demo_readiness = "stage health is not ready"
             elif mission_active:
                 demo_readiness = "demo already active"
+            elif pointing_active:
+                demo_readiness = "pointing policy owns motion"
             elif self._lease is not None or (self.motion is not None and self.motion.armed):
                 demo_readiness = "motion is already armed"
             else:
@@ -1381,6 +1525,66 @@ class CollieRuntime:
                     "heading": None if heading is None else heading.to_dict(),
                 }
             )
+            pointing_status: dict[str, object]
+            if self.pointing is None:
+                pointing_status = {
+                    "available": False,
+                    "enabled": False,
+                    "active": False,
+                    "prepared": False,
+                    "phase": "unavailable",
+                    "error": "pointing policy is not configured",
+                    "can_prepare": False,
+                    "can_run": False,
+                    "readiness": "pointing policy is not configured",
+                    "prepare_confirmation": POINTING_PREPARE_CONFIRMATION,
+                    "run_confirmation": POINTING_RUN_CONFIRMATION,
+                }
+            else:
+                pointing_status = dict(self.pointing.status())
+                if not pointing_status["available"]:
+                    pointing_readiness = str(
+                        pointing_status.get("error")
+                        or "pointing policy is unavailable"
+                    )
+                elif pointing_active:
+                    pointing_readiness = "pointing policy is active"
+                elif not motion_ready:
+                    pointing_readiness = "motion backend is not ready"
+                elif mission_active:
+                    pointing_readiness = "stop the fruit mission first"
+                elif self._lease is not None or (
+                    self.motion is not None and self.motion.armed
+                ):
+                    pointing_readiness = "stop current motion first"
+                elif not pointing_status["prepared"]:
+                    pointing_readiness = "lay Woof down first"
+                elif follow_readiness is not None:
+                    pointing_readiness = follow_readiness
+                elif target is None or target.confidence is None:
+                    pointing_readiness = (
+                        "selected target has no fresh YOLO confidence"
+                    )
+                else:
+                    pointing_readiness = "ready"
+                pointing_status.update(
+                    {
+                        "can_prepare": bool(
+                            pointing_status["available"]
+                            and motion_ready
+                            and not pointing_active
+                            and not mission_active
+                            and self._lease is None
+                            and not (
+                                self.motion is not None and self.motion.armed
+                            )
+                        ),
+                        "can_run": pointing_readiness == "ready",
+                        "readiness": pointing_readiness,
+                        "prepare_confirmation": POINTING_PREPARE_CONFIRMATION,
+                        "run_confirmation": POINTING_RUN_CONFIRMATION,
+                    }
+                )
             return {
                 "ok": camera_live,
                 "runtime_id": self._runtime_id,
@@ -1449,12 +1653,13 @@ class CollieRuntime:
                 else follow_readiness,
                 "follow_active": follow_active,
                 "armed": self._lease is not None and self.motion is not None and self.motion.armed,
-                "motion_owner": self._motion_owner,
+                "motion_owner": "pointing" if pointing_active else self._motion_owner,
                 "memory": None
                 if self._fruit_memory is None
                 else self._fruit_memory.to_status(now),
                 "voice": dict(self._voice_status),
                 "mission": mission_status,
+                "pointing": pointing_status,
                 "navigation": await self.navigation_status(),
                 "command": self._command.to_dict(),
                 "forward_budget_s": self.controller.config.forward_budget_s,
@@ -2748,6 +2953,12 @@ class CollieRuntime:
         ):
             return "selected_target_not_revalidated"
         return None
+
+    def _require_pointing_idle(self) -> None:
+        if self.pointing is not None and self.pointing.active:
+            raise RuntimeCommandError(
+                "pointing policy owns motion; stop it and wait for recovery"
+            )
 
     def _produce_revalidation_expired_locked(self, now: float) -> bool:
         """Bound target loss by both misses and elapsed time.
