@@ -134,6 +134,17 @@ fruit inference remain on Woof.
   but Woof remains stopped and continues through the safe return path. Set
   `COLLIE_ARRIVAL_HELLO_ENABLED=0` to disable it; use
   `COLLIE_ARRIVAL_HELLO_SETTLE_S` to control the stopped settling delay.
+- For the configured arrival-pointing class (the stage image defaults to
+  `pear`), three distinct detector frames in the near region trigger a different
+  handoff before the box disappears: Woof stops, enters `StandDown`, runs the
+  hash-pinned one-second bounding-box policy, and verifies that Sport mode was
+  restored. If return-home is enabled it then calls `BalanceStand` before
+  reacquiring the factory obstacle-avoidance lease. A policy guard, stale box,
+  timeout, or failed controller restoration aborts the mission. Telemetry calls
+  this a reach attempt and reports contact as `unverified`; there is no
+  independent paw-contact sensor. Configure it with
+  `COLLIE_ARRIVAL_POINTING_ENABLED`, `COLLIE_ARRIVAL_POINTING_LABEL`, and
+  `COLLIE_ARRIVAL_POINTING_TIMEOUT_S`.
 - Keeps persistent fruit memory separate from the ephemeral visual track. A
   normal target-loss stop therefore cannot erase what Woof was shown before it
   turned around.

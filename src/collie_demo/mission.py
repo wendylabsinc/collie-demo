@@ -18,6 +18,7 @@ class MissionPhase(str, Enum):
     CONFIRMING = "confirming"
     APPROACHING = "approaching"
     FINAL_APPROACHING = "final_approaching"
+    POINTING = "pointing"
     CELEBRATING = "celebrating"
     RETURNING_HOME = "returning_home"
     SUCCESS = "success"
@@ -35,6 +36,9 @@ class MissionConfig:
     match_reacquire_timeout_s: float = 3.0
     arrival_hello_enabled: bool = False
     arrival_hello_settle_s: float = 0.35
+    arrival_pointing_enabled: bool = False
+    arrival_pointing_label: str = "pear"
+    arrival_pointing_timeout_s: float = 20.0
     return_home_enabled: bool = False
     return_arrival_tolerance_m: float = 0.25
     return_heading_tolerance_rad: float = math.radians(10.0)
@@ -109,6 +113,7 @@ class MissionConfig:
             "final_approach_timeout_s",
             "final_approach_stall_timeout_s",
             "final_approach_stall_min_progress_m",
+            "arrival_pointing_timeout_s",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0.0:
@@ -125,6 +130,14 @@ class MissionConfig:
             raise ValueError("arrival_hello_settle_s must be non-negative")
         if self.final_approach_distance_m > 0.30:
             raise ValueError("final_approach_distance_m cannot exceed 0.30 m")
+        if self.arrival_pointing_label.strip().lower() not in {
+            "apple",
+            "banana",
+            "pear",
+        }:
+            raise ValueError(
+                "arrival_pointing_label must be apple, banana, or pear"
+            )
 
 
 @dataclass(slots=True)
@@ -150,6 +163,10 @@ class MissionTelemetry:
     match_stretch_error: str | None = None
     arrival_hello_status: str = "not_requested"
     arrival_hello_error: str | None = None
+    arrival_pointing_status: str = "not_requested"
+    arrival_pointing_error: str | None = None
+    arrival_pointing_target: str | None = None
+    contact_status: str = "not_requested"
     search_progress_rad: float = 0.0
     home_pose: dict[str, float] | None = None
     return_home_status: str = "not_requested"
@@ -188,6 +205,10 @@ class MissionTelemetry:
             "match_stretch_error": self.match_stretch_error,
             "arrival_hello_status": self.arrival_hello_status,
             "arrival_hello_error": self.arrival_hello_error,
+            "arrival_pointing_status": self.arrival_pointing_status,
+            "arrival_pointing_error": self.arrival_pointing_error,
+            "arrival_pointing_target": self.arrival_pointing_target,
+            "contact_status": self.contact_status,
             "search_progress_deg": round(math.degrees(self.search_progress_rad), 1),
             "home_pose": self.home_pose,
             "return_home_status": self.return_home_status,

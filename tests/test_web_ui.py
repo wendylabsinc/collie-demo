@@ -107,6 +107,8 @@ def test_touch_range_is_calibrated_as_measured_distance() -> None:
     assert 'min="2" max="30"' in html
     assert "Extra measured travel" in html
     assert "final_approach_measured_distance_m" in html
+    assert "arrival_pointing_status" in html
+    assert "contact_status" in html
     assert (
         "await api('/api/calibration/final-approach',{distance_m:cm/100})"
         in html

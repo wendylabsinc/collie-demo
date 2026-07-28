@@ -216,6 +216,22 @@ class PointingPolicyManager:
             self._last_error = "stop requested; controller restoration is still running"
         return self.status()
 
+    async def wait(self, *, timeout_s: float = 20.0) -> dict[str, object]:
+        """Wait for a run without cancelling the motor owner on timeout."""
+
+        if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+            raise ValueError("pointing wait timeout must be positive")
+        task = self._task
+        if task is None:
+            raise PointingPolicyError("pointing policy has not been started")
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+        except TimeoutError as exc:
+            raise PointingPolicyError(
+                "pointing policy is still running; request Stop and wait for restoration"
+            ) from exc
+        return self.status()
+
     async def close(self) -> None:
         await self.stop()
         task = self._task

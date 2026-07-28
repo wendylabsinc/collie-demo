@@ -509,7 +509,12 @@ class CollieRuntime:
         async with self._exclusive_skill_lock:
             return await self._start_pointing(confirmation)
 
-    async def _start_pointing(self, confirmation: str) -> dict[str, object]:
+    async def _start_pointing(
+        self,
+        confirmation: str,
+        *,
+        allow_current_mission: bool = False,
+    ) -> dict[str, object]:
         if confirmation.strip().upper() != POINTING_RUN_CONFIRMATION:
             raise RuntimeCommandError(f'type exactly "{POINTING_RUN_CONFIRMATION}"')
         if self.pointing is None:
@@ -520,7 +525,15 @@ class CollieRuntime:
             self._require_pointing_idle()
             if self._lease is not None or self.motion.armed:
                 raise RuntimeCommandError("motion is already owned; stop it first")
-            if self._mission_task is not None and not self._mission_task.done():
+            mission_owns_call = bool(
+                allow_current_mission
+                and self._mission_task is asyncio.current_task()
+            )
+            if (
+                self._mission_task is not None
+                and not self._mission_task.done()
+                and not mission_owns_call
+            ):
                 raise RuntimeCommandError("stop the fruit mission before pointing")
             async with self._state_lock:
                 now = time.monotonic()
@@ -1096,6 +1109,7 @@ class CollieRuntime:
         async with self._state_lock:
             if self._fruit_memory is None:
                 raise RuntimeCommandError("save a fruit first")
+            memory_label = self._fruit_memory.label
             now = time.monotonic()
             camera_fresh = (
                 self._last_frame_at is not None
@@ -1108,6 +1122,10 @@ class CollieRuntime:
             )
         if not camera_fresh or not produce_fresh:
             raise RuntimeCommandError("camera or fruit detector is not fresh")
+        if self._arrival_pointing_required(memory_label) and (
+            self.pointing is None or not self.pointing.available
+        ):
+            raise RuntimeCommandError("arrival pointing policy is unavailable")
         await self.stop("demo_start_reset")
         home_pose = None
         if self.mission_config.return_home_enabled:
@@ -1140,6 +1158,21 @@ class CollieRuntime:
                 return_home_status=(
                     "pending"
                     if self.mission_config.return_home_enabled
+                    else "not_requested"
+                ),
+                arrival_pointing_status=(
+                    "pending"
+                    if self._arrival_pointing_required(memory_label)
+                    else "not_requested"
+                ),
+                arrival_pointing_target=(
+                    memory_label
+                    if self._arrival_pointing_required(memory_label)
+                    else None
+                ),
+                contact_status=(
+                    "pending"
+                    if self._arrival_pointing_required(memory_label)
                     else "not_requested"
                 ),
             )
@@ -1434,6 +1467,10 @@ class CollieRuntime:
                 demo_readiness = "autonomous turn disabled"
             elif self._fruit_memory is None:
                 demo_readiness = "save a fruit first"
+            elif self._arrival_pointing_required(self._fruit_memory.label) and (
+                self.pointing is None or not self.pointing.available
+            ):
+                demo_readiness = "arrival pointing policy unavailable"
             elif self._mission.initial_hello_status == "running":
                 demo_readiness = "wait for Woof's hello gesture to finish"
             elif heading is None or not heading.healthy:
@@ -1483,6 +1520,15 @@ class CollieRuntime:
                         self.mission_config.near_confirmations_required
                     ),
                     "near_loss_grace_s": self.mission_config.near_loss_grace_s,
+                    "arrival_pointing_enabled": (
+                        self.mission_config.arrival_pointing_enabled
+                    ),
+                    "arrival_pointing_label": (
+                        self.mission_config.arrival_pointing_label
+                    ),
+                    "arrival_pointing_timeout_s": (
+                        self.mission_config.arrival_pointing_timeout_s
+                    ),
                     "final_approach_distance_m": self._final_approach_distance_m,
                     "final_approach_mps": self.mission_config.final_approach_mps,
                     "final_approach_timeout_s": (
@@ -1980,12 +2026,29 @@ class CollieRuntime:
             await self._start_memory_approach(match)
             approach_reason = await self._monitor_memory_approach()
             await self.stop("demo_visual_approach_complete")
-            approach_reason = await self._run_final_approach(approach_reason)
+            used_pointing_policy = (
+                approach_reason == "target_visible_in_pointing_range"
+            )
+            if used_pointing_policy:
+                approach_reason = await self._run_arrival_pointing()
+            else:
+                approach_reason = await self._run_final_approach(approach_reason)
             await self.stop("demo_target_reached")
-            await self._celebrate_target_reached()
+            if used_pointing_policy:
+                async with self._state_lock:
+                    self._mission.arrival_hello_status = (
+                        "replaced_by_pointing_policy"
+                    )
+            else:
+                await self._celebrate_target_reached()
             if self.mission_config.return_home_enabled:
                 await self._return_home()
-                success_reason = "remembered_fruit_reached_and_returned_home"
+                success_reason = (
+                    "pointing_reach_attempt_complete_returned_home_"
+                    "contact_unverified"
+                    if used_pointing_policy
+                    else "remembered_fruit_reached_and_returned_home"
+                )
             else:
                 success_reason = approach_reason
             async with self._state_lock:
@@ -1999,6 +2062,10 @@ class CollieRuntime:
             async with self._state_lock:
                 if self._mission.phase == MissionPhase.FINAL_APPROACHING:
                     self._mission.final_approach_status = "failed"
+                if self._mission.phase == MissionPhase.POINTING:
+                    self._mission.arrival_pointing_status = "failed"
+                    self._mission.arrival_pointing_error = reason
+                    self._mission.contact_status = "not_confirmed"
                 if self._mission.phase == MissionPhase.RETURNING_HOME:
                     self._mission.return_home_status = "failed"
                 self._mission.phase = MissionPhase.ABORTED
@@ -2009,6 +2076,10 @@ class CollieRuntime:
             async with self._state_lock:
                 if self._mission.phase == MissionPhase.FINAL_APPROACHING:
                     self._mission.final_approach_status = "failed"
+                if self._mission.phase == MissionPhase.POINTING:
+                    self._mission.arrival_pointing_status = "failed"
+                    self._mission.arrival_pointing_error = reason
+                    self._mission.contact_status = "not_confirmed"
                 if self._mission.phase == MissionPhase.RETURNING_HOME:
                     self._mission.return_home_status = "failed"
                 self._mission.phase = MissionPhase.ABORTED
@@ -2017,6 +2088,88 @@ class CollieRuntime:
         finally:
             if self._mission_task is current_task:
                 self._mission_task = None
+
+    async def _run_arrival_pointing(self) -> str:
+        """Run the bounded reach while the selected pear box is still live."""
+
+        async with self._state_lock:
+            memory = self._fruit_memory
+        if memory is None:
+            raise RuntimeCommandError("saved fruit memory disappeared")
+        if not self._arrival_pointing_required(memory.label):
+            raise RuntimeCommandError(
+                f"arrival pointing is not enabled for {memory.label}"
+            )
+        if self.pointing is None or not self.pointing.available:
+            raise RuntimeCommandError("arrival pointing policy is unavailable")
+        if not self.motion_enabled or self.motion is None:
+            raise RuntimeCommandError("motion backend is disabled")
+
+        async with self._state_lock:
+            self._mission.phase = MissionPhase.POINTING
+            self._mission.reason = "laying_down_for_live_bbox_reach"
+            self._mission.arrival_pointing_status = "preparing"
+            self._mission.arrival_pointing_error = None
+            self._mission.arrival_pointing_target = memory.label
+            self._mission.contact_status = "pending"
+        print(
+            "arrival_pointing event=prepare "
+            f"label={memory.label} contact_sensor=false",
+            flush=True,
+        )
+
+        try:
+            async with self._exclusive_skill_lock:
+                await self._prepare_pointing(POINTING_PREPARE_CONFIRMATION)
+                async with self._state_lock:
+                    self._mission.reason = "running_live_bbox_reach_policy"
+                    self._mission.arrival_pointing_status = "running"
+                await self._start_pointing(
+                    POINTING_RUN_CONFIRMATION,
+                    allow_current_mission=True,
+                )
+                status = await self.pointing.wait(
+                    timeout_s=self.mission_config.arrival_pointing_timeout_s
+                )
+                report = status.get("last_report")
+                controller_restored = bool(
+                    isinstance(report, dict)
+                    and report.get("controller_restored")
+                )
+                if status.get("phase") != "complete" or not controller_restored:
+                    raise PointingPolicyError(
+                        str(
+                            status.get("error")
+                            or "pointing policy did not complete with Sport restored"
+                        )
+                    )
+                if self.mission_config.return_home_enabled:
+                    await self.motion.perform_balance_stand()
+        except (MotionError, PointingPolicyError, RuntimeCommandError) as exc:
+            self.pointing.clear_prepared()
+            async with self._state_lock:
+                self._mission.arrival_pointing_status = "failed"
+                self._mission.arrival_pointing_error = str(exc)
+                self._mission.contact_status = "not_confirmed"
+            print(
+                f"arrival_pointing event=failed error={exc}",
+                flush=True,
+            )
+            raise RuntimeCommandError(f"arrival pointing failed: {exc}") from exc
+
+        async with self._state_lock:
+            self._mission.arrival_pointing_status = "complete"
+            self._mission.arrival_pointing_error = None
+            self._mission.contact_status = "unverified"
+            self._mission.reason = (
+                "pointing_reach_attempt_complete_contact_unverified"
+            )
+        print(
+            "arrival_pointing event=complete "
+            f"label={memory.label} contact_status=unverified",
+            flush=True,
+        )
+        return "pointing_reach_attempt_complete_contact_unverified"
 
     async def _celebrate_target_reached(self) -> None:
         """Acknowledge a verified arrival while locomotion remains disarmed."""
@@ -2487,16 +2640,22 @@ class CollieRuntime:
             near_geometry, bbox_height_ratio = self._near_target_geometry(
                 target, frame_height
             )
-            if near_geometry:
-                near_confirmations += 1
-                if (
-                    near_confirmations
-                    >= self.mission_config.near_confirmations_required
-                ):
-                    near_target_seen = True
-                    last_near_at = now
-            else:
-                near_confirmations = 0
+            new_produce_frame = bool(
+                frame is not None
+                and frame_id is not None
+                and frame_id != last_frame_id
+            )
+            if new_produce_frame:
+                if near_geometry:
+                    near_confirmations += 1
+                    if (
+                        near_confirmations
+                        >= self.mission_config.near_confirmations_required
+                    ):
+                        near_target_seen = True
+                        last_near_at = now
+                else:
+                    near_confirmations = 0
             near_target_recent = bool(
                 near_target_seen
                 and last_near_at is not None
@@ -2508,7 +2667,8 @@ class CollieRuntime:
                 self._mission.near_target_confirmations = near_confirmations
                 self._mission.near_target_bbox_height_ratio = bbox_height_ratio
 
-            if frame is not None and frame_id is not None and frame_id != last_frame_id:
+            if new_produce_frame:
+                assert frame is not None and frame_id is not None
                 last_frame_id = frame_id
                 result = self.class_matcher.match(
                     memory,
@@ -2526,6 +2686,12 @@ class CollieRuntime:
                 async with self._state_lock:
                     self._mission.last_match = result.to_dict()
                     self._mission.match_failures = failures
+                if (
+                    self._arrival_pointing_required(memory.label)
+                    and near_target_seen
+                    and associated
+                ):
+                    return "target_visible_in_pointing_range"
                 if near_target_recent and result.best is None:
                     return "target_class_reached_camera_edge"
                 if failures >= self.mission_config.approach_misses_allowed:
@@ -2959,6 +3125,13 @@ class CollieRuntime:
             raise RuntimeCommandError(
                 "pointing policy owns motion; stop it and wait for recovery"
             )
+
+    def _arrival_pointing_required(self, label: str) -> bool:
+        return bool(
+            self.mission_config.arrival_pointing_enabled
+            and label.strip().lower()
+            == self.mission_config.arrival_pointing_label.strip().lower()
+        )
 
     def _produce_revalidation_expired_locked(self, now: float) -> bool:
         """Bound target loss by both misses and elapsed time.

@@ -1,8 +1,13 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from collie_demo.pointing import PointingPolicyConfig, PointingPolicyManager
+from collie_demo.pointing import (
+    PointingPolicyConfig,
+    PointingPolicyError,
+    PointingPolicyManager,
+)
 from collie_demo.pointing_shadow import EXPECTED_POLICY_SHA256
 
 
@@ -40,6 +45,17 @@ def test_stage_policy_cannot_be_configured_past_the_visible_safe_window() -> Non
             policy_path=POLICY,
             duration_s=1.1,
         )
+
+
+def test_wait_requires_a_started_policy_run() -> None:
+    async def scenario() -> None:
+        manager = PointingPolicyManager(
+            PointingPolicyConfig(enabled=True, policy_path=POLICY)
+        )
+        with pytest.raises(PointingPolicyError, match="has not been started"):
+            await manager.wait(timeout_s=1.0)
+
+    asyncio.run(scenario())
 
 
 def test_report_summary_keeps_recovery_and_peak_guard_telemetry() -> None:

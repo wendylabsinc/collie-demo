@@ -211,6 +211,22 @@ class NearBananaThenLostDetector(NearBananaDetector):
         return super().detect(image)
 
 
+class NearPearDetector(NearBananaDetector):
+    class_thresholds = {"pear": 0.2}
+    names = {0: "pear"}
+
+    def detect(self, _image: object) -> list[FruitDetection]:
+        return [
+            FruitDetection(
+                class_id=0,
+                label="pear",
+                confidence=0.93,
+                bbox_xyxy=(540, 580, 740, 710),
+                center=(640, 645),
+            )
+        ]
+
+
 class MotionCoupledHeading:
     def __init__(self, avoidance: FakeAvoidance, sport: FakeSport | None = None) -> None:
         self.avoidance = avoidance
@@ -293,12 +309,17 @@ class FakePointingPolicy:
         self.active = False
         self.prepared = False
         self.started: tuple[str, float] | None = None
+        self.phase = "idle"
+        self.last_report: dict[str, object] | None = None
 
     def mark_prepared(self) -> None:
         self.prepared = True
+        self.phase = "prepared"
 
     def clear_prepared(self) -> None:
         self.prepared = False
+        if not self.active and self.phase == "prepared":
+            self.phase = "idle"
 
     def status(self) -> dict[str, object]:
         return {
@@ -306,12 +327,10 @@ class FakePointingPolicy:
             "enabled": True,
             "active": self.active,
             "prepared": self.prepared,
-            "phase": (
-                "running" if self.active else "prepared" if self.prepared else "idle"
-            ),
+            "phase": self.phase,
             "duration_s": 1.0,
             "error": None,
-            "last_report": None,
+            "last_report": self.last_report,
         }
 
     async def start(
@@ -321,11 +340,28 @@ class FakePointingPolicy:
             raise AssertionError("pointing started without StandDown preparation")
         self.started = (target_label, minimum_confidence)
         self.active = True
+        self.phase = "running"
+        self.last_report = None
+        return self.status()
+
+    async def wait(self, *, timeout_s: float = 20.0) -> dict[str, object]:
+        assert timeout_s > 0.0
+        assert self.active
+        self.active = False
+        self.prepared = False
+        self.phase = "complete"
+        self.last_report = {
+            "outcome": "completed_full_policy",
+            "controller_restored": True,
+            "selected_label": None if self.started is None else self.started[0],
+        }
         return self.status()
 
     async def stop(self) -> dict[str, object]:
         self.active = False
         self.prepared = False
+        if self.phase in {"running", "prepared"}:
+            self.phase = "idle"
         return self.status()
 
     async def close(self) -> None:
@@ -1328,6 +1364,109 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert any(move[0] > 0.0 for move in avoidance.moves)
             assert any(abs(move[2]) > 0.0 for move in avoidance.moves)
             assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_pear_mission_hands_live_near_bbox_to_pointing_policy() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pointing = FakePointingPolicy()
+        pose = MotionCoupledPose(avoidance, sport)
+        runtime = CollieRuntime(
+            camera=NearBananaCamera(),
+            controller=ApproachController(
+                ApproachConfig(
+                    stable_frames_required=2,
+                    maximum_target_age_s=0.75,
+                    forward_mps=0.08,
+                    forward_budget_s=0.5,
+                )
+            ),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=NearPearDetector(),
+            loop_hz=60.0,
+            maximum_produce_age_s=0.75,
+            follow_period_s=0.02,
+            heading_provider=pose,
+            pointing=pointing,  # type: ignore[arg-type]
+            mission_config=MissionConfig(
+                enabled=True,
+                autonomous_turn_enabled=True,
+                direct_turn_enabled=True,
+                arrival_hello_enabled=True,
+                arrival_pointing_enabled=True,
+                arrival_pointing_label="pear",
+                arrival_pointing_timeout_s=2.0,
+                return_home_enabled=True,
+                return_arrival_tolerance_m=0.02,
+                return_heading_tolerance_rad=0.10,
+                return_heading_gate_rad=0.55,
+                return_forward_mps=0.08,
+                return_yaw_gain=1.2,
+                return_timeout_s=3.0,
+                return_stall_timeout_s=0.75,
+                return_stall_min_progress_m=0.005,
+                capture_timeout_s=0.6,
+                match_confirmations_required=2,
+                approach_misses_allowed=2,
+                near_confirmations_required=4,
+                turn_angle_rad=0.65,
+                turn_rate_rps=0.20,
+                turn_tolerance_rad=0.05,
+                turn_timeout_s=1.5,
+                search_rate_rps=0.10,
+                search_sweep_rad=2.5,
+                search_timeout_s=1.5,
+            ),
+        )
+        await runtime.start()
+        try:
+            for _ in range(100):
+                if (await runtime.status())["produce"]["detections"]:
+                    break
+                await asyncio.sleep(0.01)
+            await runtime.remember_target("pear", (640, 645))
+            await runtime.start_demo(DEMO_CONFIRMATION)
+
+            for _ in range(300):
+                status = await runtime.status()
+                if status["mission"]["phase"] in {"waiting_for_go", "aborted"}:
+                    break
+                await asyncio.sleep(0.01)
+            assert status["mission"]["phase"] == "waiting_for_go", repr(
+                status["mission"]
+            )
+
+            await runtime.approve_demo_go(DEMO_GO_CONFIRMATION)
+            for _ in range(600):
+                status = await runtime.status()
+                if status["mission"]["phase"] in {"success", "aborted"}:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert status["mission"]["phase"] == "success", repr(
+                (status["mission"], status["pointing"])
+            )
+            assert status["mission"]["arrival_pointing_status"] == "complete"
+            assert status["mission"]["arrival_pointing_target"] == "pear"
+            assert status["mission"]["contact_status"] == "unverified"
+            assert (
+                status["mission"]["arrival_hello_status"]
+                == "replaced_by_pointing_policy"
+            )
+            assert status["mission"]["final_approach_status"] == "not_requested"
+            assert pointing.started == ("pear", 0.2)
+            assert sport.standdown_calls == 1
+            assert sport.balance_stand_calls == 1
+            assert sport.hello_calls == 0
+            assert any(move[0] > 0.0 for move in avoidance.moves)
+            assert status["mission"]["return_home_status"] == "complete"
+            assert status["armed"] is False
         finally:
             await runtime.close()
 

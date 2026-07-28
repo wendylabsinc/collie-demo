@@ -65,6 +65,13 @@ def build_runtime() -> CollieRuntime:
         arrival_hello_settle_s=float(
             os.environ.get("COLLIE_ARRIVAL_HELLO_SETTLE_S", "0.35")
         ),
+        arrival_pointing_enabled=env_bool("COLLIE_ARRIVAL_POINTING_ENABLED"),
+        arrival_pointing_label=os.environ.get(
+            "COLLIE_ARRIVAL_POINTING_LABEL", "pear"
+        ),
+        arrival_pointing_timeout_s=float(
+            os.environ.get("COLLIE_ARRIVAL_POINTING_TIMEOUT_S", "20.0")
+        ),
         return_home_enabled=env_bool("COLLIE_RETURN_HOME_ENABLED"),
         return_arrival_tolerance_m=float(
             os.environ.get("COLLIE_RETURN_ARRIVAL_TOLERANCE_M", "0.25")

@@ -281,6 +281,28 @@ def test_standdown_prepares_the_pointing_pose_while_motion_is_disarmed() -> None
     asyncio.run(scenario())
 
 
+def test_balance_stand_recovers_posture_before_return_home() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+
+        await motion.perform_balance_stand(settle_s=0.0)
+
+        assert sport.balance_stand_calls == 1
+        assert sport.stop_calls == 1
+        assert avoidance.enabled is False
+        assert avoidance.remote is False
+        assert motion.armed is False
+        assert (
+            motion.status()["last_command"]["reason"]
+            == "pointing_balance_stand_complete"
+        )
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
 def test_hello_accepts_sdk_already_stopped_response() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()

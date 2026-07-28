@@ -246,6 +246,39 @@ class UnitreeMotionAdapter:
                 reason="pointing_standdown_complete"
             )
 
+    async def perform_balance_stand(self, *, settle_s: float = 1.0) -> None:
+        """Restore the standing posture before a post-policy return-home leg."""
+
+        settle_s = float(settle_s)
+        if not math.isfinite(settle_s) or settle_s < 0.0:
+            raise ValueError(
+                "BalanceStand settle time must be finite and non-negative"
+            )
+        async with self._lock:
+            self._require_ready()
+            if self._lease is not None:
+                raise MotionNotReady("motion lease already active")
+            self._cancel_watchdog()
+            try:
+                await self._success(self.avoidance.UseRemoteCommandFromApi, False)
+                await self._success(self.avoidance.SwitchSet, False)
+                await self._idle_stop()
+                await self._success(
+                    self.sport.BalanceStand,
+                    timeout_s=self.config.skill_timeout_s,
+                )
+                if settle_s:
+                    await asyncio.sleep(settle_s)
+            except Exception as exc:
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(f"BalanceStand failed: {exc}") from exc
+            self._avoidance_enabled = False
+            self._remote_api_enabled = False
+            self._last_verify_at = None
+            self._last_command = VelocityCommand(
+                reason="pointing_balance_stand_complete"
+            )
+
     async def perform_stretch(self, *, settle_s: float = 0.0) -> None:
         """Run the stock stretch once while locomotion remains disarmed."""
 
