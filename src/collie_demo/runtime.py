@@ -1170,6 +1170,11 @@ class CollieRuntime:
                     if self._arrival_pointing_required(memory_label)
                     else None
                 ),
+                arrival_rest_status=(
+                    "pending"
+                    if self.mission_config.arrival_rest_enabled
+                    else "not_requested"
+                ),
                 contact_status=(
                     "pending"
                     if self._arrival_pointing_required(memory_label)
@@ -1528,6 +1533,12 @@ class CollieRuntime:
                     ),
                     "arrival_pointing_timeout_s": (
                         self.mission_config.arrival_pointing_timeout_s
+                    ),
+                    "arrival_rest_enabled": (
+                        self.mission_config.arrival_rest_enabled
+                    ),
+                    "arrival_rest_duration_s": (
+                        self.mission_config.arrival_rest_duration_s
                     ),
                     "final_approach_distance_m": self._final_approach_distance_m,
                     "final_approach_mps": self.mission_config.final_approach_mps,
@@ -2039,7 +2050,14 @@ class CollieRuntime:
                     self._mission.arrival_hello_status = (
                         "replaced_by_pointing_policy"
                     )
-            else:
+            if self.mission_config.arrival_rest_enabled:
+                await self._rest_at_target()
+                if not used_pointing_policy:
+                    async with self._state_lock:
+                        self._mission.arrival_hello_status = (
+                            "replaced_by_arrival_rest"
+                        )
+            elif not used_pointing_policy:
                 await self._celebrate_target_reached()
             if self.mission_config.return_home_enabled:
                 await self._return_home()
@@ -2170,6 +2188,46 @@ class CollieRuntime:
             flush=True,
         )
         return "pointing_reach_attempt_complete_contact_unverified"
+
+    async def _rest_at_target(self) -> None:
+        """Lie down visibly, hold, then stand before the return-home leg."""
+
+        if not self.mission_config.arrival_rest_enabled:
+            return
+        if not self.motion_enabled or self.motion is None:
+            raise RuntimeCommandError("motion backend is disabled")
+        async with self._state_lock:
+            self._mission.phase = MissionPhase.CELEBRATING
+            self._mission.reason = "laying_down_at_reached_fruit"
+            self._mission.arrival_rest_status = "laying_down"
+            self._mission.arrival_rest_error = None
+        print(
+            "arrival_rest event=standdown "
+            f"hold_s={self.mission_config.arrival_rest_duration_s:.2f}",
+            flush=True,
+        )
+        try:
+            async with self._exclusive_skill_lock:
+                await self.motion.perform_standdown()
+                async with self._state_lock:
+                    self._mission.reason = "resting_at_reached_fruit"
+                    self._mission.arrival_rest_status = "holding"
+                await asyncio.sleep(self.mission_config.arrival_rest_duration_s)
+                async with self._state_lock:
+                    self._mission.reason = "standing_for_return_home"
+                    self._mission.arrival_rest_status = "standing_up"
+                await self.motion.perform_balance_stand()
+        except MotionError as exc:
+            async with self._state_lock:
+                self._mission.arrival_rest_status = "failed"
+                self._mission.arrival_rest_error = str(exc)
+            print(f"arrival_rest event=failed error={exc}", flush=True)
+            raise RuntimeCommandError(f"arrival rest failed: {exc}") from exc
+        async with self._state_lock:
+            self._mission.reason = "arrival_rest_complete"
+            self._mission.arrival_rest_status = "complete"
+            self._mission.arrival_rest_error = None
+        print("arrival_rest event=complete", flush=True)
 
     async def _celebrate_target_reached(self) -> None:
         """Acknowledge a verified arrival while locomotion remains disarmed."""

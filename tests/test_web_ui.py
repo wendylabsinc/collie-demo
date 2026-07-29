@@ -147,3 +147,11 @@ def test_live_pointing_ui_requires_standdown_and_keeps_guarded_stop() -> None:
     assert "renderPointing(s)" in html
     assert "There is no bypass button." in html
     assert "--bypass-roll-guard" not in html
+
+
+def test_mission_ui_describes_arrival_rest_and_return_home() -> None:
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+
+    assert "lies down for five seconds, stands" in html
+    assert "arrival_rest_status" in html
+    assert "lay-down" in html

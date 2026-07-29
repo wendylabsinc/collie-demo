@@ -127,15 +127,15 @@ fruit inference remain on Woof.
   `COLLIE_MATCH_STRETCH_SETTLE_S` and `COLLIE_MATCH_REACQUIRE_TIMEOUT_S` control
   the animation wait and fresh-frame reacquisition window.
 - After the fruit has reached the lower camera region and then disappears, Woof
-  first releases every locomotion owner and stops. It then performs the stock
-  `Hello` paw-forward gesture as a visible arrival acknowledgement before
-  return-home begins. Early target loss never triggers this gesture. The action
-  is cosmetic and nonfatal: an SDK rejection is reported in mission telemetry,
-  but Woof remains stopped and continues through the safe return path. Set
-  `COLLIE_ARRIVAL_HELLO_ENABLED=0` to disable it; use
-  `COLLIE_ARRIVAL_HELLO_SETTLE_S` to control the stopped settling delay.
-- For the configured arrival-pointing class (the stage image defaults to
-  `pear`), three distinct detector frames in the near region trigger a different
+  first releases every locomotion owner and stops. The stage image calls the
+  stock `StandDown`, holds the completed lay-down posture for five seconds,
+  calls `BalanceStand`, and only then starts the odometry-based return home.
+  Operator Stop cancels the mission and prevents the return leg from arming.
+  Configure the sequence with `COLLIE_ARRIVAL_REST_ENABLED` and
+  `COLLIE_ARRIVAL_REST_DURATION_S`. The older stock `Hello` arrival
+  acknowledgement remains available behind `COLLIE_ARRIVAL_HELLO_ENABLED`.
+- For the configured arrival-pointing class, three distinct detector frames in
+  the near region can trigger a different
   handoff before the box disappears: Woof stops, enters `StandDown`, runs the
   hash-pinned one-second bounding-box policy, and verifies that Sport mode was
   restored. If return-home is enabled it then calls `BalanceStand` before
@@ -144,7 +144,8 @@ fruit inference remain on Woof.
   this a reach attempt and reports contact as `unverified`; there is no
   independent paw-contact sensor. Configure it with
   `COLLIE_ARRIVAL_POINTING_ENABLED`, `COLLIE_ARRIVAL_POINTING_LABEL`, and
-  `COLLIE_ARRIVAL_POINTING_TIMEOUT_S`.
+  `COLLIE_ARRIVAL_POINTING_TIMEOUT_S`. It is disabled in the stage image; the
+  manual pointing panel remains available for supervised engineering tests.
 - Keeps persistent fruit memory separate from the ephemeral visual track. A
   normal target-loss stop therefore cannot erase what Woof was shown before it
   turned around.

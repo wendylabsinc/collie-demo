@@ -36,6 +36,8 @@ class MissionConfig:
     match_reacquire_timeout_s: float = 3.0
     arrival_hello_enabled: bool = False
     arrival_hello_settle_s: float = 0.35
+    arrival_rest_enabled: bool = False
+    arrival_rest_duration_s: float = 5.0
     arrival_pointing_enabled: bool = False
     arrival_pointing_label: str = "pear"
     arrival_pointing_timeout_s: float = 20.0
@@ -128,6 +130,11 @@ class MissionConfig:
             or self.arrival_hello_settle_s < 0.0
         ):
             raise ValueError("arrival_hello_settle_s must be non-negative")
+        if (
+            not math.isfinite(self.arrival_rest_duration_s)
+            or self.arrival_rest_duration_s <= 0.0
+        ):
+            raise ValueError("arrival_rest_duration_s must be positive")
         if self.final_approach_distance_m > 0.30:
             raise ValueError("final_approach_distance_m cannot exceed 0.30 m")
         if self.arrival_pointing_label.strip().lower() not in {
@@ -163,6 +170,8 @@ class MissionTelemetry:
     match_stretch_error: str | None = None
     arrival_hello_status: str = "not_requested"
     arrival_hello_error: str | None = None
+    arrival_rest_status: str = "not_requested"
+    arrival_rest_error: str | None = None
     arrival_pointing_status: str = "not_requested"
     arrival_pointing_error: str | None = None
     arrival_pointing_target: str | None = None
@@ -205,6 +214,8 @@ class MissionTelemetry:
             "match_stretch_error": self.match_stretch_error,
             "arrival_hello_status": self.arrival_hello_status,
             "arrival_hello_error": self.arrival_hello_error,
+            "arrival_rest_status": self.arrival_rest_status,
+            "arrival_rest_error": self.arrival_rest_error,
             "arrival_pointing_status": self.arrival_pointing_status,
             "arrival_pointing_error": self.arrival_pointing_error,
             "arrival_pointing_target": self.arrival_pointing_target,

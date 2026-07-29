@@ -1274,8 +1274,8 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
                 match_stretch_enabled=True,
                 match_stretch_settle_s=0.0,
                 match_reacquire_timeout_s=1.0,
-                arrival_hello_enabled=True,
-                arrival_hello_settle_s=0.0,
+                arrival_rest_enabled=True,
+                arrival_rest_duration_s=0.01,
                 return_home_enabled=True,
                 return_arrival_tolerance_m=0.02,
                 return_heading_tolerance_rad=0.10,
@@ -1328,7 +1328,7 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert released["mission"]["phase"] == "confirming"
             assert released["mission"]["can_go"] is False
 
-            for _ in range(300):
+            for _ in range(600):
                 status = await runtime.status()
                 if status["mission"]["phase"] in {"success", "aborted"}:
                     break
@@ -1341,8 +1341,12 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             )
             assert status["mission"]["match_stretch_status"] == "complete"
             assert status["mission"]["match_stretch_error"] is None
-            assert status["mission"]["arrival_hello_status"] == "complete"
-            assert status["mission"]["arrival_hello_error"] is None
+            assert (
+                status["mission"]["arrival_hello_status"]
+                == "replaced_by_arrival_rest"
+            )
+            assert status["mission"]["arrival_rest_status"] == "complete"
+            assert status["mission"]["arrival_rest_error"] is None
             assert status["mission"]["near_target_seen"] is True
             assert status["mission"]["final_approach_status"] == "complete"
             assert status["mission"]["final_approach_measured_distance_m"] >= 0.10
@@ -1358,7 +1362,9 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert status["command"]["forward_mps"] == 0.0
             assert any(move[2] > 0.0 for move in sport.moves)
             assert sport.stretch_calls == 1
-            assert sport.hello_calls == 1
+            assert sport.hello_calls == 0
+            assert sport.standdown_calls == 1
+            assert sport.balance_stand_calls == 1
             assert all(move[0] == 0.0 and move[1] == 0.0 for move in sport.moves)
             assert all(move[2] != 0.20 for move in avoidance.moves)
             assert any(move[0] > 0.0 for move in avoidance.moves)
