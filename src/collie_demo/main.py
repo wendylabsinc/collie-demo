@@ -7,6 +7,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import create_app
+from .box_tracking import produce_tracker_factory_from_mode
 from .camera import create_camera
 from .controller import ApproachConfig, ApproachController
 from .fruit import FruitDetector
@@ -241,6 +242,9 @@ def build_runtime() -> CollieRuntime:
             ),
             device=os.environ.get("COLLIE_INFERENCE_DEVICE", "").strip() or None,
             task=os.environ.get("COLLIE_PRODUCE_TASK", "").strip() or None,
+        ),
+        produce_tracker_factory=produce_tracker_factory_from_mode(
+            os.environ.get("COLLIE_PRODUCE_TRACKER", "off")
         ),
         loop_hz=float(os.environ.get("COLLIE_CAMERA_HZ", "30")),
         annotated_hz=float(os.environ.get("COLLIE_ANNOTATED_HZ", "5")),

@@ -208,6 +208,33 @@ fruit inference remain on Woof.
 Every class emitted by the local model is selectable from the detection list.
 Whale color detection and whale motion targets have been removed.
 
+## Local box-tracker experiment
+
+The runtime contains an opt-in KLT/partial-affine image tracker for filling the
+spatial gap between GPU YOLO results. OpenCV executes the optical-flow and
+RANSAC work in native code; YOLO remains authoritative for the class and
+confidence. Tracker-only frames never manufacture or reuse a confidence score,
+and every fresh YOLO result continues to revalidate the selected class.
+
+This experiment is disabled by default and does not change the stage image:
+
+```bash
+COLLIE_PRODUCE_TRACKER=off collie-demo
+```
+
+To exercise it in a local test runtime:
+
+```bash
+COLLIE_MOTION_ENABLED=0 \
+COLLIE_PRODUCE_TRACKER=klt_affine \
+collie-demo
+```
+
+The tracker fails closed on insufficient texture, frame-size changes, too few
+forward/backward-consistent features, implausible scale, or an implausible
+one-frame jump. Do not enable it on Woof until recorded camera sequences have
+been benchmarked and shadow-compared with the TensorRT-only baseline.
+
 ## Live pointing policy
 
 Open the main UI and use the `Show the real pointing policy` panel:
