@@ -35,8 +35,8 @@
   <div class="grid">
     <section class="panel">
       <b>Voice mission</b>
-      <p class="voice-command">Say: “Find the apple”</p>
-      <p class="muted">Also accepts banana or pear. A committed command makes Woof bark, run the guarded turn and search, approach the class, use the stock paw gesture, and return to the captured start pose.</p>
+      <p class="voice-command">Say just: “apple”, “banana”, or “pear”</p>
+      <p class="muted">A committed fruit word makes Woof bark, turn and search without the Hello or Stretch gestures, approach that class, lie down and bark for five seconds, stand, return to the captured start pose, then listen for the next fruit.</p>
       <div id="voice-state" class="bad">VOICE SERVICE CONNECTING</div>
       <p id="voice-live" class="voice-live">Listening for speech…</p>
       <p id="voice-heard" class="muted">Nothing heard yet.</p>
@@ -172,12 +172,12 @@
     }
     async function voiceApi(path){const r=await fetch(`${voiceOrigin}${path}`,{method:'POST'});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail||data.error||r.statusText);return data}
     function renderVoice(s){
-      const listening=Boolean(s.listening),scribe=Boolean(s.scribe_connected),micFresh=Number.isFinite(s.mic_age_s)&&s.mic_age_s<1,healthy=Boolean(s.credential_configured&&(s.input_ready??(s.webrtc_connected&&micFresh)));
-      voiceState.textContent=!healthy?'VOICE NOT READY':listening&&scribe&&micFresh?'LISTENING':'VOICE CONNECTING';
+      const listening=Boolean(s.listening),scribe=Boolean(s.scribe_connected),micFresh=Number.isFinite(s.mic_age_s)&&s.mic_age_s<1,healthy=Boolean(s.credential_configured&&(s.input_ready??(s.webrtc_connected&&micFresh))),missionBusy=Boolean(s.mission_busy);
+      voiceState.textContent=!healthy?'VOICE NOT READY':missionBusy?'MISSION ACTIVE':listening&&scribe&&micFresh?'LISTENING':'VOICE CONNECTING';
       voiceState.className=healthy&&(!listening||(scribe&&micFresh))?'good':'bad';
-      voiceLive.textContent=s.last_partial?`“${s.last_partial}”`:listening?'Listening for speech…':'Listening paused.';
+      voiceLive.textContent=s.last_partial?`“${s.last_partial}”`:missionBusy?`Working on ${s.last_target||'fruit'}…`:listening?'Listening for a fruit word…':'Listening paused.';
       voiceHeard.textContent=s.last_heard?`Heard: “${s.last_heard}”${s.last_target?` · target ${s.last_target}`:''}`:'Nothing heard yet.';
-      voiceDetail.textContent=`${s.last_event||'starting'} · source ${s.mic_source||'Go2'} · mic ${s.mic_frames??0} frames / age ${s.mic_age_s??'—'}s · Scribe ${scribe?'connected':'offline'}${s.last_spoken?` · speaker “${s.last_spoken}”`:''}${s.last_error?` · ${s.last_error}`:''}`;
+      voiceDetail.textContent=`${s.last_event||'starting'} · source ${s.mic_source||'Go2'} · mic ${s.mic_frames??0} frames / age ${s.mic_age_s??'—'}s · Scribe ${scribe?'connected':'offline'} · arrival bark ${s.arrival_bark_status||'not requested'}${s.last_spoken?` · speaker “${s.last_spoken}”`:''}${s.last_error?` · ${s.last_error}`:''}`;
       voiceStart.disabled=voiceActionInFlight||listening;voiceStop.disabled=voiceActionInFlight||!listening;voiceBark.disabled=voiceActionInFlight||!s.webrtc_connected;
     }
     async function refreshVoice(){

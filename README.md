@@ -36,12 +36,18 @@ fruit inference remain on Woof.
   second because the earlier three-second hardware test reached the roll guard
   after 67 policy ticks.
 - Runs a separate persistent Go2 WebRTC microphone service on port 8098. It
-  accepts only deterministic `Find [the] apple|banana|pear` commands plus
-  `stop|abort|cancel`; arbitrary transcripts can never become motor commands.
-- A committed Find command plays the user-supplied native AudioHub bark, stores
-  only the requested YOLO class, and starts the normal guarded mission. The
-  voice bridge automatically releases Go only after the mission reports a fresh
-  multi-frame class lock and all stage-health checks remain ready.
+  accepts only deterministic bare `apple|banana|pear` commands, the legacy
+  `Find [the] ...` form, plus `stop|abort|cancel`; arbitrary transcripts can
+  never become motor commands.
+- A committed bare `apple`, `banana`, or `pear` command (with `pair` accepted
+  as a Scribe homophone for pear) plays the user-supplied native AudioHub bark,
+  stores only the requested YOLO class, and starts the normal guarded mission.
+  The voice-only path skips the initial Hello and recognition Stretch gestures.
+  The voice bridge automatically releases Go only after the mission reports a
+  fresh multi-frame class lock and all stage-health checks remain ready.
+- When the arrival lay-down reaches its five-second hold, the voice bridge
+  plays a second AudioHub bark. It keeps later fruit commands gated until the
+  return-home controller reports completion or the mission safely aborts.
 - Loads the Scribe credential from the root-only Wendy persistent volume at
   `/state/elevenlabs.env`. The API key is never baked into an image, committed,
   returned by `/api/status`, or printed to logs.
@@ -354,15 +360,20 @@ either feature does not remove or weaken the manual follower and STOP path.
 1. Verify the page reports `LISTENING`, a fresh microphone age, Scribe
    connected, and the main header reports `STAGE READY`.
 2. Clear the full turn, approach, and return paths.
-3. Say exactly `Find the apple`, `Find the banana`, or `Find the pear`.
-4. Woof barks, captures Home, turns, searches for that YOLO class, performs the
-   stock Stretch acknowledgement, automatically revalidates and approaches it,
-   uses the stock Hello paw-forward arrival gesture, and returns Home.
-5. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency
+3. Say exactly `apple`, `banana`, or `pear`.
+4. Woof barks, captures Home, turns, searches for that YOLO class without
+   running Hello or Stretch, automatically revalidates and approaches it, lies
+   down, barks during the five-second hold, stands, and returns Home.
+5. After return-home completes, the voice status returns to `LISTENING` and a
+   new fruit word can start the next round.
+6. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency
    stop boundary.
 
 The browser exposes voice Start, Stop, and Test Bark controls. The voice
 service owns no motion client: it can only call `POST /api/voice/mission` with
 the exact `VOICE COMMAND HEARD` confirmation. The Collie runtime still owns
 freshness checks, class locking, velocity leases, watchdogs, arrival
-classification, and return-home.
+classification, and return-home. Oliver's-desk Thor captures the USB
+speakerphone through WendyOS audio when that stream is live; the Go2 microphone
+remains connected as an automatic fallback. The Thor speaker handles spoken
+stage confirmations in either case.

@@ -24,7 +24,10 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import websocket
 
-from commands import parse_voice_command
+try:
+    from .commands import parse_voice_command
+except ImportError:  # Docker runs this file directly from /app.
+    from commands import parse_voice_command
 
 
 GO2_IP = os.environ.get("GO2_IP", "192.168.123.161")
@@ -52,6 +55,10 @@ SCRIBE_CHUNK_BYTES = (
 )
 COMMAND_DEBOUNCE_S = 4.0
 BARK_DURATION_S = 0.65
+MISSION_POLL_S = float(os.environ.get("COLLIE_VOICE_MISSION_POLL_S", "0.10"))
+MISSION_TIMEOUT_S = float(
+    os.environ.get("COLLIE_VOICE_MISSION_TIMEOUT_S", "120")
+)
 STAGE_AUDIO_URL = os.environ.get("COLLIE_STAGE_AUDIO_URL", "").rstrip("/")
 STAGE_MIC_FRESH_S = 0.75
 
@@ -99,6 +106,8 @@ class VoiceState:
             "last_event": "starting",
             "last_error": "",
             "mission_busy": False,
+            "arrival_bark_status": "not_requested",
+            "arrival_bark_error": "",
             "bark_ready": bool(BARK_UUID),
             "stage_speaker_connected": False,
             "stage_speaker_error": "",
@@ -135,6 +144,36 @@ class VoiceState:
             current = int(self._values["stage_mic_clients"])
             self._values["stage_mic_clients"] = max(0, current + delta)
 
+    def try_begin_mission(self, target: str) -> bool:
+        with self._lock:
+            if bool(self._values["mission_busy"]):
+                return False
+            self._values.update(
+                {
+                    "mission_busy": True,
+                    "last_target": target,
+                    "last_event": "barking_before_mission",
+                    "last_error": "",
+                    "arrival_bark_status": "pending",
+                    "arrival_bark_error": "",
+                }
+            )
+            return True
+
+    def finish_mission(self, *, event: str, error: str = "") -> None:
+        with self._lock:
+            self._values.update(
+                {
+                    "mission_busy": False,
+                    "last_event": event,
+                    "last_error": error[-500:],
+                }
+            )
+
+    def mission_busy(self) -> bool:
+        with self._lock:
+            return bool(self._values["mission_busy"])
+
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             result = dict(self._values)
@@ -166,7 +205,7 @@ class VoiceState:
         )
         result["model"] = SCRIBE_MODEL
         result["allowed_targets"] = ["apple", "banana", "pear"]
-        result["command_pattern"] = "Find the apple, banana, or pear"
+        result["command_pattern"] = "Say apple, banana, or pear"
         return result
 
 
@@ -183,6 +222,7 @@ active_scribe_ws: Any = None
 active_scribe_ws_lock = threading.Lock()
 last_command_key = ""
 last_command_at = 0.0
+mission_monitor_thread: threading.Thread | None = None
 
 
 def _enqueue_pcm(pcm: bytes, source: str) -> None:
@@ -376,8 +416,110 @@ def _stage_audio_supervisor() -> None:
         shutdown_event.wait(2.0)
 
 
+def _monitor_guarded_mission(round_id: str, target: str) -> None:
+    """Keep voice input gated until the robot is home or safely aborted."""
+
+    deadline = time.monotonic() + MISSION_TIMEOUT_S
+    arrival_barked = False
+    last_status_error = ""
+    while not shutdown_event.is_set() and time.monotonic() < deadline:
+        try:
+            status = _collie_status()
+            last_status_error = ""
+        except Exception as exc:
+            last_status_error = str(exc)
+            state.update(
+                last_event="voice_mission_status_reconnecting",
+                last_error=last_status_error[-500:],
+            )
+            shutdown_event.wait(MISSION_POLL_S)
+            continue
+
+        current_round_id = str(status.get("round_id") or "")
+        if round_id and current_round_id and current_round_id != round_id:
+            state.finish_mission(
+                event="voice_mission_superseded",
+                error="the active Collie round changed",
+            )
+            return
+
+        mission = dict(status.get("mission") or {})
+        phase = str(mission.get("phase") or "")
+        rest_status = str(mission.get("arrival_rest_status") or "")
+        return_status = str(mission.get("return_home_status") or "")
+
+        if rest_status == "holding" and not arrival_barked:
+            arrival_barked = True
+            state.update(
+                last_event="barking_while_resting_at_target",
+                arrival_bark_status="playing",
+                arrival_bark_error="",
+            )
+            try:
+                _play_bark()
+            except Exception as exc:
+                state.update(
+                    arrival_bark_status="failed",
+                    arrival_bark_error=str(exc)[-500:],
+                )
+                _report_event(
+                    "arrival_bark_failed",
+                    target=target,
+                    error=str(exc),
+                )
+                log.warning("Arrival bark failed without aborting mission: %s", exc)
+            else:
+                state.update(
+                    arrival_bark_status="complete",
+                    arrival_bark_error="",
+                )
+                _report_event("arrival_bark_played", target=target)
+
+        mission_active = bool(mission.get("active"))
+        if (
+            phase == "success"
+            and return_status == "complete"
+            and not mission_active
+        ):
+            _announce_on_stage_background("mission_complete", target)
+            state.finish_mission(event="voice_mission_complete_ready")
+            _report_event("voice_mission_complete_ready", target=target)
+            return
+        if phase == "aborted":
+            reason = str(mission.get("reason") or "voice mission aborted")
+            _announce_on_stage_background("mission_aborted", target)
+            state.finish_mission(
+                event="voice_mission_aborted_ready",
+                error=reason,
+            )
+            _report_event(
+                "voice_mission_aborted_ready",
+                target=target,
+                error=reason,
+            )
+            return
+
+        shutdown_event.wait(MISSION_POLL_S)
+
+    if shutdown_event.is_set():
+        return
+    try:
+        _collie_post("/api/stop", {})
+    except Exception as exc:
+        last_status_error = str(exc)
+    error = "voice mission monitor timed out"
+    if last_status_error:
+        error = f"{error}: {last_status_error}"
+    state.finish_mission(event="voice_mission_monitor_timeout", error=error)
+    _report_event(
+        "voice_mission_monitor_timeout",
+        target=target,
+        error=error,
+    )
+
+
 def _handle_committed_transcript(transcript: str) -> None:
-    global last_command_at, last_command_key
+    global last_command_at, last_command_key, mission_monitor_thread
     cleaned = " ".join(transcript.strip().split())
     if not cleaned:
         return
@@ -417,12 +559,10 @@ def _handle_committed_transcript(transcript: str) -> None:
         return
     target = command.target
     assert target is not None
-    state.update(
-        mission_busy=True,
-        last_target=target,
-        last_event="barking_before_mission",
-        last_error="",
-    )
+    if not state.try_begin_mission(target):
+        command_lock.release()
+        state.update(last_event="command_ignored_mission_busy")
+        return
     _report_event("voice_command_accepted", transcript=cleaned, target=target)
     try:
         _require_stage_preflight()
@@ -430,7 +570,7 @@ def _handle_committed_transcript(transcript: str) -> None:
         _announce_on_stage_background("command_heard", target)
         time.sleep(BARK_DURATION_S)
         state.update(last_event="submitting_guarded_mission")
-        _collie_post(
+        mission_status = _collie_post(
             "/api/voice/mission",
             {
                 "target": target,
@@ -438,12 +578,20 @@ def _handle_committed_transcript(transcript: str) -> None:
                 "confirmation": "VOICE COMMAND HEARD",
             },
         )
-        state.update(last_event="guarded_mission_started", last_error="")
+        round_id = str(mission_status.get("round_id") or "")
+        state.update(last_event="guarded_mission_active", last_error="")
         _report_event(
             "guarded_mission_started", transcript=cleaned, target=target
         )
+        mission_monitor_thread = threading.Thread(
+            target=_monitor_guarded_mission,
+            args=(round_id, target),
+            daemon=True,
+            name=f"mission-monitor-{target}",
+        )
+        mission_monitor_thread.start()
     except Exception as exc:
-        state.update(last_event="voice_mission_failed", last_error=str(exc))
+        state.finish_mission(event="voice_mission_failed", error=str(exc))
         _report_event(
             "voice_mission_failed",
             transcript=cleaned,
@@ -451,7 +599,6 @@ def _handle_committed_transcript(transcript: str) -> None:
             error=str(exc),
         )
     finally:
-        state.update(mission_busy=False)
         command_lock.release()
 
 

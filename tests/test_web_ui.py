@@ -118,7 +118,10 @@ def test_touch_range_is_calibrated_as_measured_distance() -> None:
 def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
     html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
 
-    assert "Say: “Find the apple”" in html
+    assert "Say just: “apple”, “banana”, or “pear”" in html
+    assert "without the Hello or Stretch gestures" in html
+    assert "lie down and bark for five seconds" in html
+    assert "listen for the next fruit" in html
     assert 'id="voice-state"' in html
     assert 'id="voice-live"' in html
     assert 'id="voice-start"' in html
@@ -129,6 +132,8 @@ def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
     assert "scribe_connected" in html
     assert "last_partial" in html
     assert "mic_source" in html
+    assert "mission_busy" in html
+    assert "arrival_bark_status" in html
     assert "voiceStart.onclick" in html
     assert "voiceStop.onclick" in html
     assert "voiceBark.onclick" in html

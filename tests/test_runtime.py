@@ -1510,6 +1510,8 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
                 match_reacquire_timeout_s=1.0,
                 arrival_hello_enabled=True,
                 arrival_hello_settle_s=0.0,
+                arrival_rest_enabled=True,
+                arrival_rest_duration_s=0.01,
                 return_home_enabled=True,
                 return_arrival_tolerance_m=0.02,
                 return_heading_tolerance_rad=0.10,
@@ -1547,7 +1549,7 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
             assert started["voice"]["last_heard"] == "Find the banana"
             assert started["voice"]["mission_active"] is True
 
-            for _ in range(500):
+            for _ in range(800):
                 status = await runtime.status()
                 if (
                     status["mission"]["phase"] == "aborted"
@@ -1567,10 +1569,25 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
             assert status["voice"]["last_event"] == "voice_mission_complete"
             assert status["voice"]["mission_active"] is False
             assert status["mission"]["return_home_status"] == "complete"
-            assert sport.hello_calls == 1
-            assert sport.stretch_calls == 1
+            assert status["mission"]["initial_hello_status"] == "skipped_for_voice"
+            assert status["mission"]["match_stretch_status"] == "skipped_for_voice"
+            assert status["mission"]["arrival_rest_status"] == "complete"
+            assert sport.hello_calls == 0
+            assert sport.stretch_calls == 0
+            assert sport.standdown_calls == 1
+            assert sport.balance_stand_calls == 1
             assert any(move[0] > 0.0 for move in avoidance.moves)
             assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+
+            second = await runtime.start_voice_mission(
+                "banana",
+                "banana",
+                VOICE_MISSION_CONFIRMATION,
+            )
+            assert second["voice"]["mission_active"] is True
+            assert second["voice"]["last_heard"] == "banana"
+            assert second["mission"]["initial_hello_status"] == "skipped_for_voice"
+            await runtime.stop_demo()
         finally:
             await runtime.close()
 

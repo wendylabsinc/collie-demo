@@ -237,6 +237,7 @@ class CollieRuntime:
         self._mission_task: asyncio.Task[None] | None = None
         self._demo_go_event = asyncio.Event()
         self._voice_autogo_task: asyncio.Task[None] | None = None
+        self._voice_mission_generation: int | None = None
         self._voice_status: dict[str, object] = {
             "last_event": "waiting_for_voice_service",
             "last_heard": "",
@@ -868,6 +869,7 @@ class CollieRuntime:
         async with self._state_lock:
             self._round_generation += 1
             self._round_id = uuid.uuid4().hex
+            self._voice_mission_generation = None
             self._demo_go_event.clear()
         await self.stop("round_reset")
         follow_task = self._follow_task
@@ -972,6 +974,7 @@ class CollieRuntime:
         await self.reset_round()
         async with self._state_lock:
             generation = self._round_generation
+            self._voice_mission_generation = generation
             self._fruit_memory = FruitMemory.create(
                 label=canonical_name,
                 reference_jpeg=b"",
@@ -1082,6 +1085,9 @@ class CollieRuntime:
                 self._voice_status["mission_active"] = False
                 self._voice_status["error"] = str(exc)
         finally:
+            async with self._state_lock:
+                if self._voice_mission_generation == generation:
+                    self._voice_mission_generation = None
             if self._voice_autogo_task is current_task:
                 self._voice_autogo_task = None
 
@@ -1110,6 +1116,9 @@ class CollieRuntime:
             if self._fruit_memory is None:
                 raise RuntimeCommandError("save a fruit first")
             memory_label = self._fruit_memory.label
+            voice_mission = (
+                self._voice_mission_generation == self._round_generation
+            )
             now = time.monotonic()
             camera_fresh = (
                 self._last_frame_at is not None
@@ -1173,6 +1182,16 @@ class CollieRuntime:
                 arrival_rest_status=(
                     "pending"
                     if self.mission_config.arrival_rest_enabled
+                    else "not_requested"
+                ),
+                initial_hello_status=(
+                    "skipped_for_voice"
+                    if voice_mission
+                    else "not_requested"
+                ),
+                match_stretch_status=(
+                    "skipped_for_voice"
+                    if voice_mission
                     else "not_requested"
                 ),
                 contact_status=(
@@ -2497,6 +2516,17 @@ class CollieRuntime:
     ) -> ClassCandidate:
         """Stretch once for a class lock, then require fresh visual proof."""
 
+        async with self._state_lock:
+            voice_mission = (
+                self._voice_mission_generation == self._round_generation
+            )
+            if voice_mission:
+                self._mission.match_stretch_status = "skipped_for_voice"
+                self._mission.match_stretch_error = None
+                self._mission.reason = "voice_target_class_locked_no_gesture"
+        if voice_mission:
+            print("match_stretch event=skipped source=voice", flush=True)
+            return match
         if not self.mission_config.match_stretch_enabled:
             return match
         if not self.motion_enabled or self.motion is None:
