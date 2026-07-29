@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import asdict, dataclass
 import math
 import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from .box_postprocess import (
+    BoxPostprocessor,
+    BoxPostprocessRequest,
+    BoxPostprocessResult,
+    ReferenceBoxPostprocessor,
+    compare_box_postprocess_results,
+)
 
 BBoxXYWH = tuple[float, float, float, float]
 TrackerUpdate = tuple[bool, BBoxXYWH]
@@ -67,9 +74,7 @@ class KLTBoxTrackerConfig:
         if self.maximum_lk_error <= 0.0:
             raise ValueError("maximum_lk_error must be positive")
         if self.maximum_forward_backward_error_px <= 0.0:
-            raise ValueError(
-                "maximum_forward_backward_error_px must be positive"
-            )
+            raise ValueError("maximum_forward_backward_error_px must be positive")
         if self.ransac_reprojection_px <= 0.0:
             raise ValueError("ransac_reprojection_px must be positive")
         if not 0.0 < self.minimum_scale_per_frame <= 1.0:
@@ -77,9 +82,7 @@ class KLTBoxTrackerConfig:
         if self.maximum_scale_per_frame < 1.0:
             raise ValueError("maximum_scale_per_frame must be at least 1")
         if not 0.0 < self.maximum_center_step_fraction <= 1.0:
-            raise ValueError(
-                "maximum_center_step_fraction must be in (0, 1]"
-            )
+            raise ValueError("maximum_center_step_fraction must be in (0, 1]")
         if not 0.0 < self.new_box_weight <= 1.0:
             raise ValueError("new_box_weight must be in (0, 1]")
         if self.minimum_box_size_px <= 0.0:
@@ -95,16 +98,24 @@ class KLTBoxTrackerMetrics:
     last_update_ms: float | None = None
     total_update_ms: float = 0.0
     last_failure: str = ""
+    shadow_backend: str = ""
+    shadow_checks: int = 0
+    shadow_mismatches: int = 0
+    shadow_errors: int = 0
+    last_shadow_max_abs_error: float | None = None
+    last_shadow_error: str = ""
 
     def to_dict(self) -> dict[str, object]:
         result = asdict(self)
         result["mean_update_ms"] = (
-            None
-            if self.updates == 0
-            else round(self.total_update_ms / self.updates, 3)
+            None if self.updates == 0 else round(self.total_update_ms / self.updates, 3)
         )
         if self.last_update_ms is not None:
             result["last_update_ms"] = round(self.last_update_ms, 3)
+        if self.last_shadow_max_abs_error is not None:
+            result["last_shadow_max_abs_error"] = round(
+                self.last_shadow_max_abs_error, 6
+            )
         result["total_update_ms"] = round(self.total_update_ms, 3)
         return result
 
@@ -124,8 +135,13 @@ class KLTBoxTracker:
         bbox_xywh: tuple[int, int, int, int],
         *,
         config: KLTBoxTrackerConfig | None = None,
+        shadow_postprocessor: BoxPostprocessor | None = None,
     ) -> None:
         self.config = config or KLTBoxTrackerConfig()
+        # Control-facing box postprocessing is intentionally not injectable.
+        # Mojo/MAX is permitted only as a comparison backend.
+        self._postprocessor = ReferenceBoxPostprocessor()
+        self._shadow_postprocessor = shadow_postprocessor
         gray = _as_gray_u8(bgr)
         self._height, self._width = gray.shape
         self._bbox = _clip_bbox(
@@ -137,7 +153,12 @@ class KLTBoxTracker:
         self._previous_gray = gray
         self._points = self._seed_points(gray, self._bbox)
         self._failed = False
-        self.metrics = KLTBoxTrackerMetrics(points_in_use=len(self._points))
+        self.metrics = KLTBoxTrackerMetrics(
+            points_in_use=len(self._points),
+            shadow_backend=""
+            if shadow_postprocessor is None
+            else shadow_postprocessor.name,
+        )
 
     def update(self, bgr: object) -> TrackerUpdate:
         started = time.perf_counter()
@@ -166,11 +187,7 @@ class KLTBoxTracker:
                 0.01,
             ),
         )
-        if (
-            next_points is None
-            or forward_status is None
-            or forward_error is None
-        ):
+        if next_points is None or forward_status is None or forward_error is None:
             self._failed = True
             return self._reject(started, "forward_flow_unavailable")
 
@@ -197,17 +214,12 @@ class KLTBoxTracker:
         previous_flat = self._points.reshape(-1, 2)
         next_flat = next_points.reshape(-1, 2)
         backward_flat = backward_points.reshape(-1, 2)
-        forward_backward_error = np.linalg.norm(
-            previous_flat - backward_flat, axis=1
-        )
+        forward_backward_error = np.linalg.norm(previous_flat - backward_flat, axis=1)
         valid = (
             forward_status.reshape(-1).astype(bool)
             & backward_status.reshape(-1).astype(bool)
             & (forward_error.reshape(-1) <= self.config.maximum_lk_error)
-            & (
-                forward_backward_error
-                <= self.config.maximum_forward_backward_error_px
-            )
+            & (forward_backward_error <= self.config.maximum_forward_backward_error_px)
         )
         previous_good = previous_flat[valid]
         next_good = next_flat[valid]
@@ -234,49 +246,31 @@ class KLTBoxTracker:
             self._failed = True
             return self._reject(started, "too_few_ransac_inliers")
 
-        scale = math.hypot(float(transform[0, 0]), float(transform[1, 0]))
-        if not (
-            self.config.minimum_scale_per_frame
-            <= scale
-            <= self.config.maximum_scale_per_frame
-        ):
-            self._failed = True
-            return self._reject(started, "implausible_scale")
-
-        raw_bbox = _transform_bbox(self._bbox, transform)
-        try:
-            clipped_bbox = _clip_bbox(
-                raw_bbox,
-                self._width,
-                self._height,
-                self.config.minimum_box_size_px,
-            )
-        except BoxTrackerInitializationError:
-            self._failed = True
-            return self._reject(started, "box_left_frame")
-
-        old_center = _bbox_center(self._bbox)
-        new_center = _bbox_center(clipped_bbox)
-        center_step = math.dist(old_center, new_center)
-        frame_diagonal = math.hypot(self._width, self._height)
-        if (
-            center_step
-            > frame_diagonal * self.config.maximum_center_step_fraction
-        ):
-            self._failed = True
-            return self._reject(started, "implausible_center_step")
-
-        self._bbox = _blend_bbox(
-            self._bbox,
-            clipped_bbox,
-            self.config.new_box_weight,
+        request = BoxPostprocessRequest.from_affine(
+            bbox_xywh=self._bbox,
+            affine_2x3=transform,
+            frame_width=self._width,
+            frame_height=self._height,
+            minimum_box_size_px=self.config.minimum_box_size_px,
+            minimum_scale_per_frame=self.config.minimum_scale_per_frame,
+            maximum_scale_per_frame=self.config.maximum_scale_per_frame,
+            maximum_center_step_fraction=(self.config.maximum_center_step_fraction),
+            new_box_weight=self.config.new_box_weight,
         )
+        postprocessed = self._postprocessor.process(request)
+        self._run_shadow_postprocessor(request, postprocessed)
+        if not postprocessed.valid:
+            self._failed = True
+            return self._reject(
+                started,
+                postprocessed.failure_reason or "box_postprocess_rejected",
+            )
+
+        self._bbox = postprocessed.bbox_xywh
         self._previous_gray = gray
         self._points = next_inliers.reshape(-1, 1, 2).astype(np.float32)
         if len(self._points) < self.config.target_corners:
-            self._points = self._replenish_points(
-                gray, self._bbox, self._points
-            )
+            self._points = self._replenish_points(gray, self._bbox, self._points)
 
         self.metrics.accepted_updates += 1
         self.metrics.points_in_use = len(self._points)
@@ -319,8 +313,7 @@ class KLTBoxTracker:
             if len(accepted) >= self.config.max_corners:
                 break
             if all(
-                float(np.linalg.norm(candidate - current))
-                >= minimum_distance
+                float(np.linalg.norm(candidate - current)) >= minimum_distance
                 for current in accepted
             ):
                 accepted.append(candidate)
@@ -333,6 +326,25 @@ class KLTBoxTracker:
         self._finish_timing(started)
         return False, self._bbox
 
+    def _run_shadow_postprocessor(
+        self,
+        request: BoxPostprocessRequest,
+        reference: BoxPostprocessResult,
+    ) -> None:
+        if self._shadow_postprocessor is None:
+            return
+        self.metrics.shadow_checks += 1
+        try:
+            candidate = self._shadow_postprocessor.process(request)
+            comparison = compare_box_postprocess_results(reference, candidate)
+            self.metrics.last_shadow_max_abs_error = comparison.maximum_absolute_error
+            self.metrics.last_shadow_error = ""
+            if not comparison.matches:
+                self.metrics.shadow_mismatches += 1
+        except Exception as exc:  # noqa: BLE001 - shadow cannot affect control
+            self.metrics.shadow_errors += 1
+            self.metrics.last_shadow_error = str(exc)
+
     def _finish_timing(self, started: float) -> None:
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self.metrics.last_update_ms = elapsed_ms
@@ -343,6 +355,7 @@ def produce_tracker_factory_from_mode(
     mode: str,
     *,
     config: KLTBoxTrackerConfig | None = None,
+    shadow_postprocessor: BoxPostprocessor | None = None,
 ) -> TrackerFactory | None:
     """Resolve the opt-in tracker without changing the default stage path."""
 
@@ -350,14 +363,15 @@ def produce_tracker_factory_from_mode(
     if normalized in {"", "off", "none", "disabled", "yolo"}:
         return None
     if normalized not in {"klt", "klt_affine", "opencv_klt"}:
-        raise ValueError(
-            "COLLIE_PRODUCE_TRACKER must be off or klt_affine"
-        )
+        raise ValueError("COLLIE_PRODUCE_TRACKER must be off or klt_affine")
 
-    def factory(
-        bgr: object, bbox_xywh: tuple[int, int, int, int]
-    ) -> KLTBoxTracker:
-        return KLTBoxTracker(bgr, bbox_xywh, config=config)
+    def factory(bgr: object, bbox_xywh: tuple[int, int, int, int]) -> KLTBoxTracker:
+        return KLTBoxTracker(
+            bgr,
+            bbox_xywh,
+            config=config,
+            shadow_postprocessor=shadow_postprocessor,
+        )
 
     return factory
 
@@ -386,10 +400,10 @@ def _detect_features(
     x, y, width, height = bbox
     padding_x = width * config.feature_padding_ratio
     padding_y = height * config.feature_padding_ratio
-    left = max(0, int(math.floor(x - padding_x)))
-    top = max(0, int(math.floor(y - padding_y)))
-    right = min(gray.shape[1], int(math.ceil(x + width + padding_x)))
-    bottom = min(gray.shape[0], int(math.ceil(y + height + padding_y)))
+    left = max(0, math.floor(x - padding_x))
+    top = max(0, math.floor(y - padding_y))
+    right = min(gray.shape[1], math.ceil(x + width + padding_x))
+    bottom = min(gray.shape[0], math.ceil(y + height + padding_y))
     mask = np.zeros_like(gray)
     mask[top:bottom, left:right] = 255
     return cv2.goodFeaturesToTrack(
@@ -422,46 +436,5 @@ def _clip_bbox(
     clipped_width = right - left
     clipped_height = bottom - top
     if clipped_width < minimum_size or clipped_height < minimum_size:
-        raise BoxTrackerInitializationError(
-            "selected box is outside the camera frame"
-        )
+        raise BoxTrackerInitializationError("selected box is outside the camera frame")
     return left, top, clipped_width, clipped_height
-
-
-def _transform_bbox(
-    bbox: BBoxXYWH, transform: NDArray[np.float64]
-) -> BBoxXYWH:
-    x, y, width, height = bbox
-    corners = np.asarray(
-        [
-            [x, y],
-            [x + width, y],
-            [x + width, y + height],
-            [x, y + height],
-        ],
-        dtype=np.float64,
-    )
-    transformed = cv2.transform(corners.reshape(1, -1, 2), transform)[0]
-    left, top = np.min(transformed, axis=0)
-    right, bottom = np.max(transformed, axis=0)
-    return (
-        float(left),
-        float(top),
-        float(right - left),
-        float(bottom - top),
-    )
-
-
-def _bbox_center(bbox: BBoxXYWH) -> tuple[float, float]:
-    x, y, width, height = bbox
-    return x + width / 2.0, y + height / 2.0
-
-
-def _blend_bbox(
-    previous: BBoxXYWH, current: BBoxXYWH, current_weight: float
-) -> BBoxXYWH:
-    previous_weight = 1.0 - current_weight
-    return tuple(
-        previous_weight * old + current_weight * new
-        for old, new in zip(previous, current)
-    )  # type: ignore[return-value]

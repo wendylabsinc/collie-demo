@@ -235,6 +235,45 @@ forward/backward-consistent features, implausible scale, or an implausible
 one-frame jump. Do not enable it on Woof until recorded camera sequences have
 been benchmarked and shadow-compared with the TensorRT-only baseline.
 
+### MAX/Mojo shadow postprocessor
+
+An optional MAX Graph backend loads the bundled Mojo custom operation and
+shadow-computes affine box transformation, clipping, blending, scale checks,
+and center-step checks. The Python reference remains authoritative: a Mojo
+mismatch or runtime error is counted in tracker metrics and can never replace
+the box used by Collie.
+
+Install Modular only in an isolated development environment:
+
+```bash
+uv pip install \
+  --python .venv/bin/python \
+  modular \
+  --index https://whl.modular.com/nightly/simple/ \
+  --prerelease allow
+```
+
+Run deterministic parity and transfer-overhead measurements:
+
+```bash
+.venv/bin/collie-box-postprocess-benchmark \
+  --device cpu \
+  --iterations 200
+```
+
+The runtime flags are intentionally separate and disabled by default:
+
+```bash
+COLLIE_MOTION_ENABLED=0 \
+COLLIE_PRODUCE_TRACKER=klt_affine \
+COLLIE_BOX_POSTPROCESS_SHADOW=max_mojo \
+COLLIE_BOX_POSTPROCESS_DEVICE=cpu \
+collie-demo
+```
+
+`COLLIE_BOX_POSTPROCESS_DEVICE=accelerator` is reserved for the later,
+no-motion Woof shadow test. No MAX/Mojo result has control authority.
+
 ## Live pointing policy
 
 Open the main UI and use the `Show the real pointing policy` panel:

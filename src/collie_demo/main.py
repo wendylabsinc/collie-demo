@@ -7,6 +7,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import create_app
+from .box_postprocess import shadow_box_postprocessor_from_mode
 from .box_tracking import produce_tracker_factory_from_mode
 from .camera import create_camera
 from .controller import ApproachConfig, ApproachController
@@ -49,6 +50,35 @@ def build_runtime() -> CollieRuntime:
             "models/snapstock/fruit_vegetable_yolov8m.pt",
         )
     )
+    produce_tracker_mode = os.environ.get(
+        "COLLIE_PRODUCE_TRACKER", "off"
+    )
+    box_postprocess_shadow_mode = os.environ.get(
+        "COLLIE_BOX_POSTPROCESS_SHADOW", "off"
+    )
+    shadow_postprocessor = None
+    if box_postprocess_shadow_mode.casefold().strip() not in {
+        "",
+        "off",
+        "none",
+        "disabled",
+    }:
+        if produce_tracker_mode.casefold().strip() in {
+            "",
+            "off",
+            "none",
+            "disabled",
+            "yolo",
+        }:
+            raise ValueError(
+                "MAX/Mojo box shadow requires COLLIE_PRODUCE_TRACKER=klt_affine"
+            )
+        shadow_postprocessor = shadow_box_postprocessor_from_mode(
+            box_postprocess_shadow_mode,
+            device=os.environ.get(
+                "COLLIE_BOX_POSTPROCESS_DEVICE", "auto"
+            ),
+        )
     initialize_dds(network_interface)
     mission_config = MissionConfig(
         enabled=env_bool("COLLIE_MEMORY_DEMO_ENABLED"),
@@ -244,7 +274,8 @@ def build_runtime() -> CollieRuntime:
             task=os.environ.get("COLLIE_PRODUCE_TASK", "").strip() or None,
         ),
         produce_tracker_factory=produce_tracker_factory_from_mode(
-            os.environ.get("COLLIE_PRODUCE_TRACKER", "off")
+            produce_tracker_mode,
+            shadow_postprocessor=shadow_postprocessor,
         ),
         loop_hz=float(os.environ.get("COLLIE_CAMERA_HZ", "30")),
         annotated_hz=float(os.environ.get("COLLIE_ANNOTATED_HZ", "5")),

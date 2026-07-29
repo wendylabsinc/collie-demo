@@ -4,12 +4,29 @@ import cv2
 import numpy as np
 import pytest
 
+from collie_demo.box_postprocess import (
+    BoxPostprocessRequest,
+    BoxPostprocessResult,
+)
 from collie_demo.box_tracking import (
     BoxTrackerInitializationError,
     KLTBoxTracker,
     KLTBoxTrackerConfig,
     produce_tracker_factory_from_mode,
 )
+
+
+class MismatchedShadowPostprocessor:
+    name = "deliberate_mismatch"
+
+    def process(self, request: BoxPostprocessRequest) -> BoxPostprocessResult:
+        return BoxPostprocessResult(
+            bbox_xywh=(0.0, 0.0, 1.0, 1.0),
+            valid=False,
+            scale=0.0,
+            center_step_px=0.0,
+            failure_reason="test_mismatch",
+        )
 
 
 def _textured_patch(width: int = 90, height: int = 70) -> np.ndarray:
@@ -55,6 +72,26 @@ def test_klt_tracker_follows_translation_and_reports_metrics() -> None:
     assert status["metrics"]["last_update_ms"] >= 0.0
 
 
+def test_shadow_mismatch_never_changes_control_facing_box() -> None:
+    patch = _textured_patch()
+    initial = _frame_with_patch(patch, 70, 80)
+    tracker = KLTBoxTracker(
+        initial,
+        (70, 80, 90, 70),
+        shadow_postprocessor=MismatchedShadowPostprocessor(),
+    )
+
+    ok, bbox = tracker.update(_frame_with_patch(patch, 79, 86))
+
+    assert ok is True
+    assert bbox == pytest.approx((79.0, 86.0, 90.0, 70.0), abs=2.0)
+    metrics = tracker.status()["metrics"]
+    assert metrics["shadow_backend"] == "deliberate_mismatch"
+    assert metrics["shadow_checks"] == 1
+    assert metrics["shadow_mismatches"] == 1
+    assert metrics["shadow_errors"] == 0
+
+
 def test_klt_tracker_follows_many_camera_rate_frames() -> None:
     patch = _textured_patch()
     tracker = KLTBoxTracker(
@@ -64,9 +101,7 @@ def test_klt_tracker_follows_many_camera_rate_frames() -> None:
 
     bbox = (50.0, 70.0, 90.0, 70.0)
     for step in range(1, 25):
-        ok, bbox = tracker.update(
-            _frame_with_patch(patch, 50 + 2 * step, 70 + step)
-        )
+        ok, bbox = tracker.update(_frame_with_patch(patch, 50 + 2 * step, 70 + step))
         assert ok is True
 
     x, y, width, height = bbox
@@ -104,9 +139,7 @@ def test_klt_tracker_fails_closed_when_frame_shape_changes() -> None:
 def test_klt_tracker_rejects_textureless_selection() -> None:
     frame = np.full((240, 320, 3), 30, dtype=np.uint8)
 
-    with pytest.raises(
-        BoxTrackerInitializationError, match="too little image texture"
-    ):
+    with pytest.raises(BoxTrackerInitializationError, match="too little image texture"):
         KLTBoxTracker(frame, (70, 80, 90, 70))
 
 
@@ -117,9 +150,7 @@ def test_klt_tracker_validates_bbox() -> None:
     with pytest.raises(BoxTrackerInitializationError, match="too small"):
         KLTBoxTracker(frame, (70, 80, 2, 2))
 
-    with pytest.raises(
-        BoxTrackerInitializationError, match="outside the camera frame"
-    ):
+    with pytest.raises(BoxTrackerInitializationError, match="outside the camera frame"):
         KLTBoxTracker(frame, (400, 300, 20, 20))
 
 

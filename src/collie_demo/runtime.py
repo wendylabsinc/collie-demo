@@ -86,6 +86,23 @@ def _create_tracker_for_frame(
     return factory(frame.bgr.copy(), bbox_xywh)
 
 
+def _tracker_diagnostics(
+    tracker: ProduceTrackerProtocol | None,
+) -> dict[str, object] | None:
+    if tracker is None:
+        return None
+    status = getattr(tracker, "status", None)
+    if not callable(status):
+        return None
+    try:
+        result = status()
+    except Exception as exc:  # noqa: BLE001 - diagnostics cannot break status
+        return {"error": str(exc)}
+    if not isinstance(result, dict):
+        return {"error": "tracker status did not return an object"}
+    return result
+
+
 def _encode_legacy_frame(
     frame: CameraFrame,
     detections: list[FruitDetection],
@@ -1735,6 +1752,9 @@ class CollieRuntime:
                         if self.produce_tracker_factory is not None
                         else "yolo",
                         "label": self._produce_tracker_label,
+                        "diagnostics": _tracker_diagnostics(
+                            self._produce_tracker
+                        ),
                         "target": None
                         if self._produce_tracker_label is None or target is None
                         else target.to_dict(),
