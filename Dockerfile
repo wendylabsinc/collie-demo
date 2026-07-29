@@ -187,7 +187,7 @@ COPY web/ web/
 COPY models/collie/collie-fruit-yoloe11m.pt models/collie/collie-fruit-yoloe11m.pt
 COPY models/collie/collie-fruit-yoloe11m.engine models/collie/collie-fruit-yoloe11m.engine
 COPY models/pointing/policy_actor_42500.jit models/pointing/policy_actor_42500.jit
-ENV COLLIE_PRODUCE_CLASS_THRESHOLDS="apple=0.70,banana=0.20,pear=0.70"
+ENV COLLIE_PRODUCE_CLASS_THRESHOLDS="apple=0.70,banana=0.20,pear=0.35"
 
 EXPOSE 8096
 CMD ["python3", "-m", "collie_demo.supervisor"]
