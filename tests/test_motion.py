@@ -12,6 +12,7 @@ class FakeSport:
         self.stop_calls = 0
         self.stop_result = 0
         self.balance_stand_calls = 0
+        self.stand_up_calls = 0
         self.hello_calls = 0
         self.stretch_calls = 0
         self.standdown_calls = 0
@@ -27,6 +28,9 @@ class FakeSport:
         return 0
     def BalanceStand(self) -> int:
         self.balance_stand_calls += 1
+        return 0
+    def StandUp(self) -> int:
+        self.stand_up_calls += 1
         return 0
     def Hello(self) -> int:
         self.hello_calls += 1
@@ -281,22 +285,23 @@ def test_standdown_prepares_the_pointing_pose_while_motion_is_disarmed() -> None
     asyncio.run(scenario())
 
 
-def test_balance_stand_recovers_posture_before_return_home() -> None:
+def test_stand_up_recovers_posture_before_return_home() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
         motion = UnitreeMotionAdapter(sport, avoidance)
         await motion.initialize()
 
-        await motion.perform_balance_stand(settle_s=0.0)
+        await motion.perform_stand_up(settle_s=0.0)
 
-        assert sport.balance_stand_calls == 1
+        assert sport.stand_up_calls == 1
+        assert sport.balance_stand_calls == 0
         assert sport.stop_calls == 1
         assert avoidance.enabled is False
         assert avoidance.remote is False
         assert motion.armed is False
         assert (
             motion.status()["last_command"]["reason"]
-            == "pointing_balance_stand_complete"
+            == "pointing_stand_up_complete"
         )
         await motion.close()
 

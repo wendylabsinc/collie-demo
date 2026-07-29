@@ -31,6 +31,7 @@ NAVIGATION_ARM_CONFIRMATION = "MAP AND PATH CLEAR"
 DEMO_CONFIRMATION = "TARGET SAVED AND AREA CLEAR"
 DEMO_GO_CONFIRMATION = "CLASS LOCKED AND PATH CLEAR"
 VOICE_MISSION_CONFIRMATION = "VOICE COMMAND HEARD"
+POSTURE_STAND_CONFIRMATION = "WOOF IS CLEAR TO STAND"
 
 
 class CameraProtocol(Protocol):
@@ -475,6 +476,29 @@ class CollieRuntime:
 
         async with self._exclusive_skill_lock:
             return await self._prepare_pointing(confirmation)
+
+    async def restore_standing(self, confirmation: str) -> dict[str, object]:
+        """Stop all owners and use Unitree's paired StandUp transition."""
+
+        if confirmation.strip().upper() != POSTURE_STAND_CONFIRMATION:
+            raise RuntimeCommandError(
+                f'type exactly "{POSTURE_STAND_CONFIRMATION}"'
+            )
+        if not self.motion_enabled or self.motion is None:
+            raise RuntimeCommandError("motion backend is disabled")
+        async with self._exclusive_skill_lock:
+            await self.stop("posture_stand_prepare")
+            async with self._action_lock:
+                try:
+                    await self.motion.perform_stand_up()
+                except MotionError as exc:
+                    raise RuntimeCommandError(str(exc)) from exc
+                if self.pointing is not None:
+                    self.pointing.clear_prepared()
+                self._command = VelocityCommand(
+                    reason="posture_stand_up_complete"
+                )
+        return await self.status()
 
     async def _prepare_pointing(self, confirmation: str) -> dict[str, object]:
         if confirmation.strip().upper() != POINTING_PREPARE_CONFIRMATION:
@@ -2181,7 +2205,7 @@ class CollieRuntime:
                         )
                     )
                 if self.mission_config.return_home_enabled:
-                    await self.motion.perform_balance_stand()
+                    await self.motion.perform_stand_up()
         except (MotionError, PointingPolicyError, RuntimeCommandError) as exc:
             self.pointing.clear_prepared()
             async with self._state_lock:
@@ -2235,7 +2259,7 @@ class CollieRuntime:
                 async with self._state_lock:
                     self._mission.reason = "standing_for_return_home"
                     self._mission.arrival_rest_status = "standing_up"
-                await self.motion.perform_balance_stand()
+                await self.motion.perform_stand_up()
         except MotionError as exc:
             async with self._state_lock:
                 self._mission.arrival_rest_status = "failed"

@@ -1410,7 +1410,7 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert sport.stretch_calls == 1
             assert sport.hello_calls == 0
             assert sport.standdown_calls == 1
-            assert sport.balance_stand_calls == 1
+            assert sport.stand_up_calls == 1
             assert all(move[0] == 0.0 and move[1] == 0.0 for move in sport.moves)
             assert all(move[2] != 0.20 for move in avoidance.moves)
             assert any(move[0] > 0.0 for move in avoidance.moves)
@@ -1514,7 +1514,7 @@ def test_pear_mission_hands_live_near_bbox_to_pointing_policy() -> None:
             assert status["mission"]["final_approach_status"] == "not_requested"
             assert pointing.started == ("pear", 0.2)
             assert sport.standdown_calls == 1
-            assert sport.balance_stand_calls == 1
+            assert sport.stand_up_calls == 1
             assert sport.hello_calls == 0
             assert any(move[0] > 0.0 for move in avoidance.moves)
             assert status["mission"]["return_home_status"] == "complete"
@@ -1632,7 +1632,7 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
             assert sport.hello_calls == 0
             assert sport.stretch_calls == 0
             assert sport.standdown_calls == 1
-            assert sport.balance_stand_calls == 1
+            assert sport.stand_up_calls == 1
             assert any(move[0] > 0.0 for move in avoidance.moves)
             assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
 

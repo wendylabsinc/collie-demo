@@ -140,7 +140,8 @@ fruit inference remain on Woof.
 - After the fruit has reached the lower camera region and then disappears, Woof
   first releases every locomotion owner and stops. The stage image calls the
   stock `StandDown`, holds the completed lay-down posture for five seconds,
-  calls `BalanceStand`, and only then starts the odometry-based return home.
+  calls the paired Unitree `StandUp`, and only then starts the odometry-based
+  return home.
   Operator Stop cancels the mission and prevents the return leg from arming.
   Configure the sequence with `COLLIE_ARRIVAL_REST_ENABLED` and
   `COLLIE_ARRIVAL_REST_DURATION_S`. The older stock `Hello` arrival
@@ -149,7 +150,7 @@ fruit inference remain on Woof.
   the near region can trigger a different
   handoff before the box disappears: Woof stops, enters `StandDown`, runs the
   hash-pinned one-second bounding-box policy, and verifies that Sport mode was
-  restored. If return-home is enabled it then calls `BalanceStand` before
+  restored. If return-home is enabled it then calls `StandUp` before
   reacquiring the factory obstacle-avoidance lease. A policy guard, stale box,
   timeout, or failed controller restoration aborts the mission. Telemetry calls
   this a reach attempt and reports contact as `unverified`; there is no
