@@ -2901,6 +2901,16 @@ class CollieRuntime:
                 now - last_progress_at
                 >= self.mission_config.final_approach_stall_timeout_s
             ):
+                if (
+                    measured_distance
+                    >= self.mission_config.final_approach_stall_min_progress_m
+                ):
+                    return await self._complete_partial_final_approach(
+                        reason="stall",
+                        started_at=started_at,
+                        commanded_distance=commanded_distance,
+                        measured_distance=measured_distance,
+                    )
                 raise RuntimeCommandError(
                     "final approach stalled before touch range"
                 )
@@ -2922,7 +2932,51 @@ class CollieRuntime:
                     measured_distance
                 )
             await asyncio.sleep(0.05)
+        if (
+            best_distance
+            >= self.mission_config.final_approach_stall_min_progress_m
+        ):
+            return await self._complete_partial_final_approach(
+                reason="timeout",
+                started_at=started_at,
+                commanded_distance=commanded_distance,
+                measured_distance=best_distance,
+            )
         raise RuntimeCommandError("final approach timed out before touch range")
+
+    async def _complete_partial_final_approach(
+        self,
+        *,
+        reason: str,
+        started_at: float,
+        commanded_distance: float,
+        measured_distance: float,
+    ) -> str:
+        """Stop a blocked edge-confirmed approach and continue to StandDown."""
+
+        await self.navigation_command(0.0, 0.0)
+        elapsed = time.monotonic() - started_at
+        async with self._state_lock:
+            self._mission.reason = (
+                f"partial_final_approach_{reason}_continuing_to_standdown"
+            )
+            self._mission.final_approach_status = "partial"
+            self._mission.final_approach_elapsed_s = elapsed
+            self._mission.final_approach_commanded_distance_m = (
+                commanded_distance
+            )
+            self._mission.final_approach_measured_distance_m = (
+                measured_distance
+            )
+        print(
+            "final_approach event=partial "
+            f"reason={reason} elapsed_s={elapsed:.3f} "
+            f"commanded_distance_m={commanded_distance:.3f} "
+            f"measured_distance_m={measured_distance:.3f} "
+            "next=standdown",
+            flush=True,
+        )
+        return f"measured_final_approach_partial_{reason}"
 
     async def _return_home(self) -> None:
         """Return to the captured start pose using fresh local odometry.

@@ -294,6 +294,44 @@ class MotionCoupledPose(MotionCoupledHeading):
         )
 
 
+class OutwardStallingPose(MotionCoupledPose):
+    """Allow a little outward travel, then block until commands return home."""
+
+    def __init__(
+        self,
+        avoidance: FakeAvoidance,
+        sport: FakeSport | None = None,
+        *,
+        maximum_outward_distance_m: float = 0.04,
+    ) -> None:
+        super().__init__(avoidance, sport)
+        self.maximum_outward_distance_m = maximum_outward_distance_m
+
+    def status(self) -> HeadingSample:
+        previous_x = self.x_m
+        previous_y = self.y_m
+        sample = super().status()
+        previous_distance = math.hypot(previous_x, previous_y)
+        proposed_distance = math.hypot(self.x_m, self.y_m)
+        if (
+            previous_distance >= self.maximum_outward_distance_m
+            and proposed_distance > previous_distance
+        ):
+            self.x_m = previous_x
+            self.y_m = previous_y
+            return HeadingSample(
+                self.yaw,
+                0.0,
+                True,
+                None,
+                self.x_m,
+                self.y_m,
+                True,
+                None,
+            )
+        return sample
+
+
 class CallbackStretchSport(FakeSport):
     def __init__(self, on_stretch: Callable[[], None]) -> None:
         super().__init__()
@@ -1490,7 +1528,7 @@ def test_pear_mission_hands_live_near_bbox_to_pointing_policy() -> None:
 def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
-        pose = MotionCoupledPose(avoidance, sport)
+        pose = OutwardStallingPose(avoidance, sport)
         runtime = CollieRuntime(
             camera=NearBananaCamera(),
             controller=ApproachController(
@@ -1529,6 +1567,8 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
                 return_timeout_s=3.0,
                 return_stall_timeout_s=0.75,
                 return_stall_min_progress_m=0.005,
+                final_approach_stall_timeout_s=0.10,
+                final_approach_stall_min_progress_m=0.005,
                 match_confirmations_required=2,
                 approach_misses_allowed=2,
                 turn_angle_rad=0.65,
@@ -1580,6 +1620,11 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
             assert status["mission"]["initial_hello_status"] == "skipped_for_voice"
             assert status["mission"]["match_stretch_status"] == "skipped_for_voice"
             assert status["mission"]["arrival_rest_status"] == "complete"
+            assert status["mission"]["final_approach_status"] == "partial"
+            assert (
+                status["mission"]["final_approach_measured_distance_m"]
+                >= 0.005
+            )
             assert (
                 status["mission"]["near_target_bbox_height_ratio"]
                 < runtime.mission_config.near_bbox_height_ratio
