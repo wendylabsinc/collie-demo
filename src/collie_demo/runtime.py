@@ -2994,8 +2994,11 @@ class CollieRuntime:
         """Return to the captured start pose using fresh local odometry.
 
         This is deliberately a short-range stage controller, not a global map
-        planner. Every command uses the factory obstacle-avoidance lease, and
-        stale pose, lack of progress, or timeout immediately aborts the run.
+        planner. Translation uses the factory obstacle-avoidance lease. Large
+        heading corrections use the measured yaw-only lease because the
+        avoidance service may suppress a pure rotation when Woof is parked
+        close to the reached object. Stale pose, lack of progress, or timeout
+        immediately aborts the run.
         """
 
         if self.heading_provider is None:
@@ -3024,6 +3027,28 @@ class CollieRuntime:
             f"timeout_s={self.mission_config.return_timeout_s:.2f}",
             flush=True,
         )
+
+        # StandUp leaves Woof facing the reached fruit, normally about 180
+        # degrees away from Home. Reorient before acquiring the translation
+        # lease so obstacle avoidance only has to make small steering
+        # corrections while walking.
+        if initial_distance > self.mission_config.return_arrival_tolerance_m:
+            initial_goal_heading = math.atan2(
+                home[1] - initial.y_m,
+                home[0] - initial.x_m,
+            )
+        else:
+            initial_goal_heading = home[2]
+        await self._orient_for_return(
+            initial_goal_heading,
+            deadline=deadline,
+            stage="departure",
+        )
+
+        # Rotation is not a translation stall. Start the progress window only
+        # after the departure heading is established.
+        best_distance = initial_distance
+        last_progress_at = time.monotonic()
         await self.navigation_arm(NAVIGATION_ARM_CONFIRMATION)
         last_log_at = 0.0
         while time.monotonic() < deadline:
@@ -3041,32 +3066,61 @@ class CollieRuntime:
             distance = math.hypot(dx, dy)
             if distance <= self.mission_config.return_arrival_tolerance_m:
                 heading_error = normalize_angle(home[2] - sample.yaw_rad)
-                if (
-                    abs(heading_error)
-                    <= self.mission_config.return_heading_tolerance_rad
-                ):
-                    await self.stop("return_home_complete")
-                    async with self._state_lock:
-                        self._mission.return_home_status = "complete"
-                        self._mission.return_distance_m = distance
-                        self._mission.return_heading_error_rad = heading_error
-                        self._mission.return_progress_m = max(
-                            0.0, initial_distance - distance
-                        )
-                    print(
-                        "return_home event=complete "
-                        f"elapsed_s={now - started_at:.3f} "
-                        f"distance_m={distance:.3f} "
-                        f"heading_error_deg={math.degrees(heading_error):.1f}",
-                        flush=True,
+                if abs(heading_error) > self.mission_config.return_heading_tolerance_rad:
+                    await self.stop("return_home_position_reached")
+                    await self._orient_for_return(
+                        home[2],
+                        deadline=deadline,
+                        stage="final_heading",
                     )
-                    return
-                forward_mps = 0.0
+                    sample = self.heading_provider.status()
+                    if not sample.pose_healthy:
+                        raise RuntimeCommandError(
+                            "Go2 local pose became stale at Home"
+                        )
+                    assert (
+                        sample.x_m is not None
+                        and sample.y_m is not None
+                        and sample.yaw_rad is not None
+                    )
+                    distance = math.hypot(
+                        home[0] - sample.x_m,
+                        home[1] - sample.y_m,
+                    )
+                    heading_error = normalize_angle(home[2] - sample.yaw_rad)
+                await self.stop("return_home_complete")
+                async with self._state_lock:
+                    self._mission.return_home_status = "complete"
+                    self._mission.return_distance_m = distance
+                    self._mission.return_heading_error_rad = heading_error
+                    self._mission.return_progress_m = max(
+                        0.0, initial_distance - distance
+                    )
+                print(
+                    "return_home event=complete "
+                    f"elapsed_s={time.monotonic() - started_at:.3f} "
+                    f"distance_m={distance:.3f} "
+                    f"heading_error_deg={math.degrees(heading_error):.1f}",
+                    flush=True,
+                )
+                return
             else:
                 goal_heading = math.atan2(dy, dx)
                 heading_error = normalize_angle(goal_heading - sample.yaw_rad)
                 if abs(heading_error) > self.mission_config.return_heading_gate_rad:
-                    forward_mps = 0.0
+                    # Do not spend the entire mission asking obstacle avoidance
+                    # for a pure rotation. Release it, correct yaw with the
+                    # watchdog-protected direct lease, then reacquire
+                    # obstacle-protected translation.
+                    await self.stop("return_home_reorient")
+                    await self._orient_for_return(
+                        goal_heading,
+                        deadline=deadline,
+                        stage="course_correction",
+                    )
+                    await self.navigation_arm(NAVIGATION_ARM_CONFIRMATION)
+                    last_progress_at = time.monotonic()
+                    continue
                 else:
                     remaining = max(
                         0.0,
@@ -3112,6 +3166,94 @@ class CollieRuntime:
                 )
             await asyncio.sleep(0.05)
         raise RuntimeCommandError("return home timed out")
+
+    async def _orient_for_return(
+        self,
+        target_yaw_rad: float,
+        *,
+        deadline: float,
+        stage: str,
+    ) -> None:
+        """Turn in place to a measured return-home heading.
+
+        Translation is impossible under this lease. The same watchdog,
+        heading freshness, stall guard, and global return deadline remain in
+        force.
+        """
+
+        if self.heading_provider is None:
+            raise RuntimeCommandError("fresh Go2 heading is unavailable")
+        sample = self.heading_provider.status()
+        if not sample.healthy or sample.yaw_rad is None:
+            raise RuntimeCommandError("fresh Go2 heading is unavailable")
+        initial_error = normalize_angle(target_yaw_rad - sample.yaw_rad)
+        if abs(initial_error) <= self.mission_config.return_heading_tolerance_rad:
+            return
+
+        await self._direct_turn_arm()
+        started_at = time.monotonic()
+        best_error = abs(initial_error)
+        last_progress_at = started_at
+        last_log_at = 0.0
+        print(
+            "return_home_turn event=start "
+            f"stage={stage} "
+            f"heading_error_deg={math.degrees(initial_error):.1f}",
+            flush=True,
+        )
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            sample = self.heading_provider.status()
+            if not sample.healthy or sample.yaw_rad is None:
+                raise RuntimeCommandError(
+                    "Go2 heading became stale during return turn"
+                )
+            heading_error = normalize_angle(target_yaw_rad - sample.yaw_rad)
+            error_magnitude = abs(heading_error)
+            async with self._state_lock:
+                self._mission.return_heading_error_rad = heading_error
+                self._mission.reason = f"return_home_{stage}_turn"
+            if error_magnitude <= self.mission_config.return_heading_tolerance_rad:
+                await self.stop(f"return_home_{stage}_turn_complete")
+                print(
+                    "return_home_turn event=complete "
+                    f"stage={stage} "
+                    f"elapsed_s={now - started_at:.3f} "
+                    f"heading_error_deg={math.degrees(heading_error):.1f}",
+                    flush=True,
+                )
+                return
+
+            if (
+                best_error - error_magnitude
+                >= self.mission_config.turn_stall_min_progress_rad
+            ):
+                best_error = error_magnitude
+                last_progress_at = now
+            elif (
+                now - last_progress_at
+                >= self.mission_config.turn_stall_timeout_s
+            ):
+                raise RuntimeCommandError(
+                    "return home "
+                    f"{stage} turn stalled at "
+                    f"{math.degrees(heading_error):.1f} degrees"
+                )
+
+            yaw_rps = self.mission_config.return_yaw_gain * heading_error
+            await self._direct_turn_command(yaw_rps)
+            if now - last_log_at >= 0.25:
+                last_log_at = now
+                print(
+                    "return_home_turn event=progress "
+                    f"stage={stage} "
+                    f"elapsed_s={now - started_at:.3f} "
+                    f"heading_error_deg={math.degrees(heading_error):.1f} "
+                    f"command_yaw_rps={yaw_rps:.3f}",
+                    flush=True,
+                )
+            await asyncio.sleep(0.05)
+        raise RuntimeCommandError("return home timed out during heading correction")
 
     async def _match_latest_frame(
         self, last_frame_id: int | None

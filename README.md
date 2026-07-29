@@ -193,13 +193,17 @@ fruit inference remain on Woof.
   limits preserve the original 2.4 m reach while reducing distance travelled
   between detector updates.
 - Captures Home from fresh local odometry when the operator starts the mission.
-  After the fruit is reached, the return controller uses the factory obstacle-
-  avoidance channel, turns toward Home, drives at up to 0.30 m/s, and restores
-  the original heading. It stops within a 25 cm position tolerance and aborts on
-  stale pose, a 45-second timeout, or less than 4 cm of translational progress
-  in six seconds. Those progress limits match the slower displacement observed
-  behind the factory avoidance controller while retaining a bounded fail-stop.
-  This is a short-range open-stage return controller, not a global map planner.
+  After the fruit is reached, the return controller first uses the measured
+  watchdog-protected yaw-only Sport lease to face Home; translation is
+  impossible during this in-place correction. It then reacquires the factory
+  obstacle-avoidance channel, drives at up to 0.30 m/s, and uses the same
+  yaw-only handoff to restore the original heading after reaching Home. It
+  stops within a 10 cm position tolerance and aborts on stale pose, a
+  45-second timeout, a stalled heading correction, or less than 4 cm of
+  translational progress in six seconds. Those progress limits match the
+  slower displacement observed behind the factory avoidance controller while
+  retaining a bounded fail-stop. This is a short-range open-stage return
+  controller, not a global map planner.
 
 Every class emitted by the local model is selectable from the detection list.
 Whale color detection and whale motion targets have been removed.

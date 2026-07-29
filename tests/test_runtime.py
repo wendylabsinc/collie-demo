@@ -1289,6 +1289,53 @@ def test_return_home_demo_refuses_to_start_without_fresh_local_position() -> Non
     asyncio.run(scenario())
 
 
+def test_return_home_reorients_directly_before_avoidance_translation() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = MotionCoupledPose(avoidance, sport)
+        pose.x_m = 0.15
+        pose.y_m = 0.0
+        pose.yaw = 0.0
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=False,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_arrival_tolerance_m=0.02,
+                return_heading_tolerance_rad=0.10,
+                return_heading_gate_rad=0.55,
+                return_forward_mps=0.08,
+                return_yaw_gain=1.2,
+                return_timeout_s=3.0,
+                return_stall_timeout_s=0.75,
+                return_stall_min_progress_m=0.005,
+            ),
+        )
+        await runtime.start()
+        try:
+            # Home is behind Woof, and its saved heading points back along the
+            # same short stage path. The return must turn under the yaw-only
+            # lease before obstacle-protected translation begins.
+            runtime._home_pose = (0.0, 0.0, math.pi)
+            await runtime._return_home()
+
+            status = await runtime.status()
+            assert status["mission"]["return_home_status"] == "complete"
+            assert status["mission"]["return_distance_m"] <= 0.02
+            assert any(abs(move[2]) > 0.0 for move in sport.moves)
+            assert any(move[0] > 0.0 for move in avoidance.moves)
+            assert status["armed"] is False
+            assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
 def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
