@@ -361,7 +361,7 @@ either feature does not remove or weaken the manual follower and STOP path.
    connected, and the main header reports `STAGE READY`.
 2. Clear the full turn, approach, and return paths.
 3. Say exactly `apple`, `banana`, or `pear`, or type one of those labels into
-   the voice panel and press `Find Fruit`.
+   the voice panel and press `Run [fruit] Full Sequence`.
 4. Woof barks, captures Home, turns, searches for that YOLO class without
    running Hello or Stretch, automatically revalidates and approaches it, lies
    down, barks during the five-second hold, stands, and returns Home.
@@ -370,10 +370,13 @@ either feature does not remove or weaken the manual follower and STOP path.
 6. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency
    stop boundary.
 
-The browser exposes a typed fruit-command field plus voice Start, Stop, and
-Test Bark controls. Typed labels enter through `POST /api/command` on the voice
-service and use the same bark, preflight, and guarded-mission path as committed
-speech. The voice service owns no motion client: it can only call
+The browser exposes a typed fruit-command field with one explicit full-sequence
+button plus voice Start, Stop, and Test Bark controls. No additional Go input is
+needed after that button is pressed: the existing voice mission releases its
+internal Go only after a fresh class lock and remains active through the guarded
+return Home. Typed labels enter through `POST /api/command` on the voice service
+and use the same bark, preflight, and guarded-mission path as committed speech.
+The voice service owns no motion client: it can only call
 `POST /api/voice/mission` with the exact `VOICE COMMAND HEARD` confirmation.
 The Collie runtime still owns freshness checks, class locking, velocity leases,
 watchdogs, arrival classification, and return-home. Oliver's-desk Thor captures

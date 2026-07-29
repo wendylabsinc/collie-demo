@@ -17,7 +17,7 @@
     .actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.choose,.save{padding:9px 12px;white-space:nowrap}.save{background:#126548}.choose.selected{outline:3px solid #55f09a;background:#226e51}
     #reference{display:none;width:150px;max-height:130px;object-fit:contain;border:1px solid #458772;border-radius:10px;background:#000;margin-top:8px}
     #mission-phase{text-transform:uppercase;font-size:1.12rem;font-weight:800}.button-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    #voice-state{font-size:1.12rem;font-weight:800}.voice-command{font-size:1.2rem;color:#55f09a;margin:.55rem 0}.voice-live{min-height:1.5em;font-size:1.35rem;font-weight:800;color:#fff;margin:.55rem 0}.voice-controls{display:flex;gap:8px;flex-wrap:wrap}.voice-controls button{flex:1}.voice-command-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin:.8rem 0}.voice-command-form input{min-width:0;border:1px solid #458772;border-radius:10px;padding:11px;background:#06120f;color:#fff;font:inherit}.voice-command-form input:focus{outline:3px solid #55f09a;outline-offset:1px}#voice-submit{background:#2ead62}@media(max-width:520px){.voice-command-form{grid-template-columns:1fr}}
+    #voice-state{font-size:1.12rem;font-weight:800}.voice-command{font-size:1.2rem;color:#55f09a;margin:.55rem 0}.voice-live{min-height:1.5em;font-size:1.35rem;font-weight:800;color:#fff;margin:.55rem 0}.voice-controls{display:flex;gap:8px;flex-wrap:wrap}.voice-controls button{flex:1}.voice-command-form{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,auto);gap:8px;margin:.8rem 0}.voice-command-form input{min-width:0;border:1px solid #458772;border-radius:10px;padding:13px;background:#06120f;color:#fff;font:inherit;font-size:1.08rem}.voice-command-form input:focus{outline:3px solid #55f09a;outline-offset:1px}#voice-submit{background:#2ead62;min-height:56px;font-size:1.05rem}@media(max-width:680px){.voice-command-form{grid-template-columns:1fr}.voice-command-form .form-spacer{display:none}}
     .pointing-panel{border-color:#6e5f2a;background:linear-gradient(145deg,#16251c,#251f0c)}#pointing-state{font-size:1.22rem;font-weight:900;text-transform:uppercase}.pointing-controls{display:grid;grid-template-columns:1fr 1fr;gap:8px}.pointing-controls button{min-height:66px}#pointing-prepare{background:#785a13}#pointing-run{background:#2ead62;font-size:1.08rem}.policy-metrics{font-variant-numeric:tabular-nums}
     details{margin-top:12px}summary{cursor:pointer;font-weight:800}code{overflow-wrap:anywhere}input[type=range]{width:min(520px,100%)}output{font-weight:800;color:#55f09a}
   </style>
@@ -38,12 +38,12 @@
       <p class="voice-command">Say just: “apple”, “banana”, or “pear”</p>
       <p class="muted">A committed fruit word makes Woof bark, turn and search without the Hello or Stretch gestures, approach that class, lie down and bark for five seconds, stand, return to the captured start pose, then listen for the next fruit.</p>
       <form id="voice-command-form" class="voice-command-form">
-        <label for="voice-command-input" class="muted">Type instead of speaking</label>
-        <span></span>
+        <label for="voice-command-input" class="muted">1. Type a fruit instead of speaking</label>
+        <span class="form-spacer"></span>
         <input id="voice-command-input" type="text" inputmode="text" autocomplete="off" maxlength="16" placeholder="apple, banana, or pear" aria-describedby="voice-command-feedback">
-        <button id="voice-submit" type="submit">FIND FRUIT</button>
+        <button id="voice-submit" type="submit">2. RUN FULL SEQUENCE</button>
       </form>
-      <p id="voice-command-feedback" class="muted">Typing uses the same guarded mission as a spoken fruit word.</p>
+      <p id="voice-command-feedback" class="muted">One click runs bark → turn/search → approach → five-second lay-down/bark → stand → return Home. No additional Go click is required.</p>
       <div id="voice-state" class="bad">VOICE SERVICE CONNECTING</div>
       <p id="voice-live" class="voice-live">Listening for speech…</p>
       <p id="voice-heard" class="muted">Nothing heard yet.</p>
@@ -179,7 +179,7 @@
     }
     async function voiceApi(path,body){const r=await fetch(`${voiceOrigin}${path}`,{method:'POST',headers:body?{'content-type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail||data.error||r.statusText);return data}
     function typedFruit(){const value=voiceCommandInput.value.trim().toLowerCase();return value==='apple'||value==='banana'||value==='pear'?value:''}
-    function updateTypedCommand(s={}){const fruit=typedFruit(),busy=Boolean(s.mission_busy);voiceCommandInput.disabled=voiceActionInFlight||busy;voiceSubmit.disabled=voiceActionInFlight||busy||!fruit;voiceSubmit.textContent=voiceActionInFlight?'STARTING…':busy?'MISSION ACTIVE':fruit?`FIND ${fruit.toUpperCase()}`:'FIND FRUIT'}
+    function updateTypedCommand(s={}){const fruit=typedFruit(),busy=Boolean(s.mission_busy);voiceCommandInput.disabled=voiceActionInFlight||busy;voiceSubmit.disabled=voiceActionInFlight||busy||!fruit;voiceSubmit.textContent=voiceActionInFlight?'STARTING FULL SEQUENCE…':busy?'FULL SEQUENCE RUNNING…':fruit?`RUN ${fruit.toUpperCase()} FULL SEQUENCE`:'2. RUN FULL SEQUENCE'}
     function renderVoice(s){
       const listening=Boolean(s.listening),scribe=Boolean(s.scribe_connected),micFresh=Number.isFinite(s.mic_age_s)&&s.mic_age_s<1,healthy=Boolean(s.credential_configured&&(s.input_ready??(s.webrtc_connected&&micFresh))),missionBusy=Boolean(s.mission_busy);
       voiceState.textContent=!healthy?'VOICE NOT READY':missionBusy?'MISSION ACTIVE':listening&&scribe&&micFresh?'LISTENING':'VOICE CONNECTING';
@@ -188,6 +188,9 @@
       voiceHeard.textContent=s.last_heard?`Heard: “${s.last_heard}”${s.last_target?` · target ${s.last_target}`:''}`:'Nothing heard yet.';
       voiceDetail.textContent=`${s.last_event||'starting'} · source ${s.mic_source||'Go2'} · mic ${s.mic_frames??0} frames / age ${s.mic_age_s??'—'}s · Scribe ${scribe?'connected':'offline'} · arrival bark ${s.arrival_bark_status||'not requested'}${s.last_spoken?` · speaker “${s.last_spoken}”`:''}${s.last_error?` · ${s.last_error}`:''}`;
       voiceStart.disabled=voiceActionInFlight||listening;voiceStop.disabled=voiceActionInFlight||!listening;voiceBark.disabled=voiceActionInFlight||!s.webrtc_connected;
+      if(missionBusy)voiceCommandFeedback.textContent=`Full sequence running for ${s.last_target||'fruit'}. No more input is required; STOP NOW remains available.`;
+      else if(s.last_event==='voice_mission_complete_ready')voiceCommandFeedback.textContent='Full sequence complete. Woof returned Home and is ready for another fruit.';
+      else if(s.last_event==='voice_mission_aborted_ready'||s.last_event==='voice_mission_failed')voiceCommandFeedback.textContent=`Full sequence stopped: ${s.last_error||'mission aborted'}`;
       updateTypedCommand(s);
     }
     async function refreshVoice(){
@@ -197,7 +200,7 @@
       finally{voiceRefreshInFlight=false}
     }
     async function voiceAction(path){if(voiceActionInFlight)return;voiceActionInFlight=true;try{renderVoice(await voiceApi(path))}catch(e){voiceDetail.textContent=e.message}finally{voiceActionInFlight=false;await refreshVoice()}}
-    async function submitTypedFruit(event){event.preventDefault();if(voiceActionInFlight)return;const fruit=typedFruit();if(!fruit){voiceCommandFeedback.textContent='Type exactly apple, banana, or pear.';updateTypedCommand();return}voiceActionInFlight=true;updateTypedCommand();voiceCommandFeedback.textContent=`Sending ${fruit} through the guarded mission path…`;try{const s=await voiceApi('/api/command',{command:fruit});voiceCommandInput.value='';voiceCommandFeedback.textContent=`${fruit} accepted. Woof is starting the mission.`;renderVoice(s)}catch(e){voiceCommandFeedback.textContent=e.message}finally{voiceActionInFlight=false;await refreshVoice()}}
+    async function submitTypedFruit(event){event.preventDefault();if(voiceActionInFlight)return;const fruit=typedFruit();if(!fruit){voiceCommandFeedback.textContent='Type exactly apple, banana, or pear.';updateTypedCommand();return}voiceActionInFlight=true;updateTypedCommand();voiceCommandFeedback.textContent=`Starting the complete ${fruit} sequence…`;try{const s=await voiceApi('/api/command',{command:fruit});voiceCommandInput.value='';voiceCommandFeedback.textContent=`${fruit} accepted. No more input is needed; Woof will return Home on its own.`;renderVoice(s)}catch(e){voiceCommandFeedback.textContent=e.message}finally{voiceActionInFlight=false;await refreshVoice()}}
     async function pointingAction(path,confirmation){if(pointingActionInFlight)return;pointingActionInFlight=true;try{const s=await api(path,confirmation?{confirmation}:undefined);renderPointing(s);targetFeedback.textContent=path.endsWith('/prepare')?'Woof is laying down. Wait for the camera and selected bbox to settle, then run the point.':path.endsWith('/run')?'Pointing policy started.':'Pointing stop requested; waiting for safe controller restoration.'}catch(e){pointingDetail.textContent=e.message}finally{pointingActionInFlight=false;await refresh()}}
     async function rememberFruit(name,center){if(capturing||!roundId)return;const requestGeneration=uiRoundGeneration;capturing=true;targetFeedback.textContent=`Saving class ${name}…`;try{const s=await api('/api/memory/capture',{target:name,center,round_id:roundId});if(requestGeneration!==uiRoundGeneration)return;const hello=s.mission?.initial_hello_status;if(hello==='complete')targetFeedback.textContent=`Class ${name} saved. Woof acknowledged it with a paw. Place a ${name} behind Woof.`;else if(hello==='failed')targetFeedback.textContent=`Class ${name} was saved, but the Hello gesture failed: ${s.mission?.initial_hello_error||'unknown SDK error'}`;else targetFeedback.textContent=`Class ${name} saved. Place a ${name} behind Woof.`}catch(e){if(requestGeneration===uiRoundGeneration)targetFeedback.textContent=e.message}finally{if(requestGeneration===uiRoundGeneration){capturing=false;await refresh()}}}
     async function chooseTarget(name,center){following=false;startingFollow=false;try{await api('/api/target',{target:name,center});targetFeedback.textContent=`${name} selected for manual fallback.`;await refresh()}catch(e){targetFeedback.textContent=e.message}}
