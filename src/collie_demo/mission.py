@@ -71,7 +71,7 @@ class MissionConfig:
     final_approach_mps: float = 0.10
     final_approach_timeout_s: float = 3.0
     final_approach_stall_timeout_s: float = 1.0
-    final_approach_stall_min_progress_m: float = 0.01
+    final_approach_stall_min_progress_m: float = 0.001
 
     def __post_init__(self) -> None:
         if self.capture_timeout_s <= 0.0:

@@ -159,7 +159,7 @@ def build_runtime() -> CollieRuntime:
             os.environ.get("COLLIE_FINAL_APPROACH_STALL_TIMEOUT_S", "1.0")
         ),
         final_approach_stall_min_progress_m=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_STALL_MIN_PROGRESS_M", "0.01")
+            os.environ.get("COLLIE_FINAL_APPROACH_STALL_MIN_PROGRESS_M", "0.001")
         ),
     )
     controller_config = ApproachConfig(

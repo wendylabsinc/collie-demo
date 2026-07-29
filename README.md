@@ -48,10 +48,11 @@ fruit inference remain on Woof.
 - When the arrival lay-down enters its five-second hold, the voice bridge
   plays exactly one AudioHub bark. It keeps later fruit commands gated until the
   return-home controller reports completion or the mission safely aborts.
-- A bottom-edge-confirmed fruit that makes measurable forward progress but is
-  stopped short of the calibrated 10 cm by factory avoidance now stops cleanly
-  and continues into the same StandDown sequence. Zero-progress final approaches
-  and unverified target losses still abort.
+- Once repeated detections confirm a fruit at the lower camera edge, a final
+  10 cm nudge that factory avoidance blocks stops cleanly and continues into the
+  same StandDown sequence, even when local odometry reports no additional
+  distance. Camera/pose staleness and target losses before lower-edge
+  confirmation still abort.
 - Loads the Scribe credential from the root-only Wendy persistent volume at
   `/state/elevenlabs.env`. The API key is never baked into an image, committed,
   returned by `/api/status`, or printed to logs.

@@ -2901,18 +2901,11 @@ class CollieRuntime:
                 now - last_progress_at
                 >= self.mission_config.final_approach_stall_timeout_s
             ):
-                if (
-                    measured_distance
-                    >= self.mission_config.final_approach_stall_min_progress_m
-                ):
-                    return await self._complete_partial_final_approach(
-                        reason="stall",
-                        started_at=started_at,
-                        commanded_distance=commanded_distance,
-                        measured_distance=measured_distance,
-                    )
-                raise RuntimeCommandError(
-                    "final approach stalled before touch range"
+                return await self._complete_partial_final_approach(
+                    reason="stall",
+                    started_at=started_at,
+                    commanded_distance=commanded_distance,
+                    measured_distance=measured_distance,
                 )
             remaining = target_distance - measured_distance
             command_mps = min(
@@ -2932,17 +2925,12 @@ class CollieRuntime:
                     measured_distance
                 )
             await asyncio.sleep(0.05)
-        if (
-            best_distance
-            >= self.mission_config.final_approach_stall_min_progress_m
-        ):
-            return await self._complete_partial_final_approach(
-                reason="timeout",
-                started_at=started_at,
-                commanded_distance=commanded_distance,
-                measured_distance=best_distance,
-            )
-        raise RuntimeCommandError("final approach timed out before touch range")
+        return await self._complete_partial_final_approach(
+            reason="timeout",
+            started_at=started_at,
+            commanded_distance=commanded_distance,
+            measured_distance=best_distance,
+        )
 
     async def _complete_partial_final_approach(
         self,

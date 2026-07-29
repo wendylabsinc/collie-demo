@@ -1568,7 +1568,7 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
                 return_stall_timeout_s=0.75,
                 return_stall_min_progress_m=0.005,
                 final_approach_stall_timeout_s=0.10,
-                final_approach_stall_min_progress_m=0.005,
+                final_approach_stall_min_progress_m=0.001,
                 match_confirmations_required=2,
                 approach_misses_allowed=2,
                 turn_angle_rad=0.65,
@@ -1622,8 +1622,8 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
             assert status["mission"]["arrival_rest_status"] == "complete"
             assert status["mission"]["final_approach_status"] == "partial"
             assert (
-                status["mission"]["final_approach_measured_distance_m"]
-                >= 0.005
+                status["mission"]["final_approach_commanded_distance_m"]
+                > 0.0
             )
             assert (
                 status["mission"]["near_target_bbox_height_ratio"]
