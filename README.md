@@ -45,8 +45,8 @@ fruit inference remain on Woof.
   The voice-only path skips the initial Hello and recognition Stretch gestures.
   The voice bridge automatically releases Go only after the mission reports a
   fresh multi-frame class lock and all stage-health checks remain ready.
-- When the arrival lay-down reaches its five-second hold, the voice bridge
-  plays a second AudioHub bark. It keeps later fruit commands gated until the
+- When the arrival lay-down enters its five-second hold, the voice bridge
+  plays exactly one AudioHub bark. It keeps later fruit commands gated until the
   return-home controller reports completion or the mission safely aborts.
 - Loads the Scribe credential from the root-only Wendy persistent volume at
   `/state/elevenlabs.env`. The API key is never baked into an image, committed,
@@ -364,7 +364,8 @@ either feature does not remove or weaken the manual follower and STOP path.
    the voice panel and press `Run [fruit] Full Sequence`.
 4. Woof barks, captures Home, turns, searches for that YOLO class without
    running Hello or Stretch, automatically revalidates and approaches it, lies
-   down, barks during the five-second hold, stands, and returns Home.
+   down, barks once, remains down for five seconds, stands, and returns to
+   Home's saved position and heading.
 5. After return-home completes, the voice status returns to `LISTENING` and a
    new fruit word can start the next round.
 6. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency

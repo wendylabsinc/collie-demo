@@ -36,14 +36,14 @@
     <section class="panel">
       <b>Voice mission</b>
       <p class="voice-command">Say just: “apple”, “banana”, or “pear”</p>
-      <p class="muted">A committed fruit word makes Woof bark, turn and search without the Hello or Stretch gestures, approach that class, lie down and bark for five seconds, stand, return to the captured start pose, then listen for the next fruit.</p>
+      <p class="muted">A committed fruit word makes Woof bark, turn and search without the Hello or Stretch gestures, approach that class, lie down, bark once, remain down for five seconds, stand, return to the captured start pose and heading, then listen for the next fruit.</p>
       <form id="voice-command-form" class="voice-command-form">
         <label for="voice-command-input" class="muted">1. Type a fruit instead of speaking</label>
         <span class="form-spacer"></span>
         <input id="voice-command-input" type="text" inputmode="text" autocomplete="off" maxlength="16" placeholder="apple, banana, or pear" aria-describedby="voice-command-feedback">
         <button id="voice-submit" type="submit">2. RUN FULL SEQUENCE</button>
       </form>
-      <p id="voice-command-feedback" class="muted">One click runs bark → turn/search → approach → five-second lay-down/bark → stand → return Home. No additional Go click is required.</p>
+      <p id="voice-command-feedback" class="muted">One click runs bark → turn/search → approach → lie down → one bark → five-second rest → stand → return Home. No additional Go click is required.</p>
       <div id="voice-state" class="bad">VOICE SERVICE CONNECTING</div>
       <p id="voice-live" class="voice-live">Listening for speech…</p>
       <p id="voice-heard" class="muted">Nothing heard yet.</p>
@@ -70,7 +70,7 @@
     </section>
     <section class="panel">
       <b>2. Turn, find it, then wait for Go</b>
-      <p class="muted">Place one fruit of the saved class behind Woof. Woof turns, locks that class, stretches, and stops. After Go, it approaches the fruit, lies down for five seconds, stands, and returns to its saved start pose.</p>
+      <p class="muted">Place one fruit of the saved class behind Woof. Woof turns, locks that class, stretches, and stops. After Go, it approaches the fruit, lies down, barks once, remains down for five seconds, stands, and returns to its saved start pose and heading.</p>
       <p id="mission-phase" class="bad">IDLE</p>
       <p id="mission" class="muted">Save a fruit first.</p>
       <button id="run" disabled>RUN REMEMBER &amp; FIND</button>

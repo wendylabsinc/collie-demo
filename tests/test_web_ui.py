@@ -120,7 +120,8 @@ def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
 
     assert "Say just: “apple”, “banana”, or “pear”" in html
     assert "without the Hello or Stretch gestures" in html
-    assert "lie down and bark for five seconds" in html
+    assert "lie down, bark once, remain down for five seconds" in html
+    assert "return to the captured start pose and heading" in html
     assert "listen for the next fruit" in html
     assert 'id="voice-state"' in html
     assert 'id="voice-live"' in html
@@ -131,6 +132,7 @@ def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
     assert 'id="voice-submit"' in html
     assert "Type a fruit instead of speaking" in html
     assert "RUN FULL SEQUENCE" in html
+    assert "one bark → five-second rest" in html
     assert "No additional Go click is required." in html
     assert "No more input is needed; Woof will return Home on its own." in html
     assert "voice_mission_complete_ready" in html
@@ -166,6 +168,7 @@ def test_live_pointing_ui_requires_standdown_and_keeps_guarded_stop() -> None:
 def test_mission_ui_describes_arrival_rest_and_return_home() -> None:
     html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
 
-    assert "lies down for five seconds, stands" in html
+    assert "lies down, barks once, remains down for five seconds, stands" in html
+    assert "saved start pose and heading" in html
     assert "arrival_rest_status" in html
     assert "lay-down" in html

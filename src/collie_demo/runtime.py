@@ -2690,10 +2690,12 @@ class CollieRuntime:
         bottom_ratio = (y + height) / frame_height
         center_ratio = target.center[1] / frame_height
         bbox_height_ratio = height / frame_height
+        # Floor objects can leave the camera through the lower edge before
+        # their boxes grow large. Bottom-center travel is therefore the arrival
+        # evidence; box size remains a separate pointing-policy range guard.
         return (
             bottom_ratio >= self.mission_config.near_bottom_ratio
-            and center_ratio >= self.mission_config.near_center_ratio
-            and bbox_height_ratio >= self.mission_config.near_bbox_height_ratio,
+            and center_ratio >= self.mission_config.near_center_ratio,
             bbox_height_ratio,
         )
 
@@ -2778,6 +2780,9 @@ class CollieRuntime:
                     self._arrival_pointing_required(memory.label)
                     and near_target_seen
                     and associated
+                    and bbox_height_ratio is not None
+                    and bbox_height_ratio
+                    >= self.mission_config.near_bbox_height_ratio
                 ):
                     return "target_visible_in_pointing_range"
                 if near_target_recent and result.best is None:

@@ -200,7 +200,7 @@ class NearBananaDetector:
 
 
 class NearBananaThenLostDetector(NearBananaDetector):
-    """Simulate the fruit leaving the lower camera edge after forward motion."""
+    """Simulate a small floor fruit leaving the lower edge after motion."""
 
     def __init__(self, avoidance: FakeAvoidance) -> None:
         self.avoidance = avoidance
@@ -208,7 +208,15 @@ class NearBananaThenLostDetector(NearBananaDetector):
     def detect(self, image: object) -> list[FruitDetection]:
         if any(move[0] > 0.0 for move in self.avoidance.moves):
             return []
-        return super().detect(image)
+        return [
+            FruitDetection(
+                class_id=0,
+                label="banana",
+                confidence=0.92,
+                bbox_xyxy=(620, 670, 660, 710),
+                center=(640, 690),
+            )
+        ]
 
 
 class NearPearDetector(NearBananaDetector):
@@ -1572,6 +1580,10 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
             assert status["mission"]["initial_hello_status"] == "skipped_for_voice"
             assert status["mission"]["match_stretch_status"] == "skipped_for_voice"
             assert status["mission"]["arrival_rest_status"] == "complete"
+            assert (
+                status["mission"]["near_target_bbox_height_ratio"]
+                < runtime.mission_config.near_bbox_height_ratio
+            )
             assert sport.hello_calls == 0
             assert sport.stretch_calls == 0
             assert sport.standdown_calls == 1
