@@ -127,6 +127,11 @@ def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
     assert 'id="voice-start"' in html
     assert 'id="voice-stop"' in html
     assert 'id="voice-bark"' in html
+    assert 'id="voice-command-input"' in html
+    assert 'id="voice-submit"' in html
+    assert "Type instead of speaking" in html
+    assert "voiceApi('/api/command',{command:fruit})" in html
+    assert "voiceCommandForm.onsubmit=submitTypedFruit" in html
     assert ":8098/api/status" not in html  # assembled from the shared origin
     assert "webrtc_connected" in html
     assert "scribe_connected" in html

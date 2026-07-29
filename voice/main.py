@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, WebSocket as FastAPIWebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import uvicorn
 import websocket
 
@@ -68,6 +69,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("collie-voice")
 logging.getLogger("aiortc.codecs.h264").setLevel(logging.ERROR)
+
+
+class TypedCommandRequest(BaseModel):
+    command: str
 
 
 class _DropFrameSpam(logging.Filter):
@@ -518,11 +523,11 @@ def _monitor_guarded_mission(round_id: str, target: str) -> None:
     )
 
 
-def _handle_committed_transcript(transcript: str) -> None:
+def _handle_committed_transcript(transcript: str) -> str:
     global last_command_at, last_command_key, mission_monitor_thread
     cleaned = " ".join(transcript.strip().split())
     if not cleaned:
-        return
+        return "speech_ignored_empty"
     state.update(
         last_heard=cleaned,
         last_partial="",
@@ -532,13 +537,13 @@ def _handle_committed_transcript(transcript: str) -> None:
     if command is None:
         state.update(last_event="speech_ignored_not_a_command")
         _report_event("speech_ignored_not_a_command", transcript=cleaned)
-        return
+        return "speech_ignored_not_a_command"
 
     command_key = f"{command.kind}:{command.target or ''}"
     now = time.monotonic()
     if command_key == last_command_key and now - last_command_at < COMMAND_DEBOUNCE_S:
         state.update(last_event="duplicate_command_ignored")
-        return
+        return "duplicate_command_ignored"
     last_command_key = command_key
     last_command_at = now
 
@@ -547,22 +552,23 @@ def _handle_committed_transcript(transcript: str) -> None:
             _collie_post("/api/stop", {})
             state.update(last_event="voice_stop_applied", last_error="")
             _report_event("voice_stop_applied", transcript=cleaned)
+            return "voice_stop_applied"
         except Exception as exc:
             state.update(last_event="voice_stop_failed", last_error=str(exc))
             _report_event(
                 "voice_stop_failed", transcript=cleaned, error=str(exc)
             )
-        return
+            return "voice_stop_failed"
 
     if not command_lock.acquire(blocking=False):
         state.update(last_event="command_ignored_mission_busy")
-        return
+        return "command_ignored_mission_busy"
     target = command.target
     assert target is not None
     if not state.try_begin_mission(target):
         command_lock.release()
         state.update(last_event="command_ignored_mission_busy")
-        return
+        return "command_ignored_mission_busy"
     _report_event("voice_command_accepted", transcript=cleaned, target=target)
     try:
         _require_stage_preflight()
@@ -590,6 +596,7 @@ def _handle_committed_transcript(transcript: str) -> None:
             name=f"mission-monitor-{target}",
         )
         mission_monitor_thread.start()
+        return "guarded_mission_active"
     except Exception as exc:
         state.finish_mission(event="voice_mission_failed", error=str(exc))
         _report_event(
@@ -598,6 +605,7 @@ def _handle_committed_transcript(transcript: str) -> None:
             target=target,
             error=str(exc),
         )
+        return "voice_mission_failed"
     finally:
         command_lock.release()
 
@@ -897,6 +905,30 @@ app.add_middleware(
 @app.get("/api/status")
 def api_status() -> dict[str, object]:
     return state.snapshot()
+
+
+@app.post("/api/command")
+def typed_command(request: TypedCommandRequest) -> dict[str, object]:
+    """Run a typed fruit label through the same guarded path as speech."""
+
+    command = parse_voice_command(request.command)
+    if command is None or command.kind != "find":
+        raise HTTPException(
+            status_code=422,
+            detail="Type apple, banana, or pear.",
+        )
+    outcome = _handle_committed_transcript(request.command)
+    snapshot = state.snapshot()
+    if outcome != "guarded_mission_active":
+        detail = {
+            "duplicate_command_ignored": "That command was just submitted.",
+            "command_ignored_mission_busy": "A fruit mission is already active.",
+            "voice_mission_failed": str(
+                snapshot.get("last_error") or "The guarded mission could not start."
+            ),
+        }.get(outcome, "The typed fruit command was not accepted.")
+        raise HTTPException(status_code=409, detail=detail)
+    return snapshot
 
 
 @app.websocket("/api/audio/ws")

@@ -360,7 +360,8 @@ either feature does not remove or weaken the manual follower and STOP path.
 1. Verify the page reports `LISTENING`, a fresh microphone age, Scribe
    connected, and the main header reports `STAGE READY`.
 2. Clear the full turn, approach, and return paths.
-3. Say exactly `apple`, `banana`, or `pear`.
+3. Say exactly `apple`, `banana`, or `pear`, or type one of those labels into
+   the voice panel and press `Find Fruit`.
 4. Woof barks, captures Home, turns, searches for that YOLO class without
    running Hello or Stretch, automatically revalidates and approaches it, lies
    down, barks during the five-second hold, stands, and returns Home.
@@ -369,11 +370,13 @@ either feature does not remove or weaken the manual follower and STOP path.
 6. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency
    stop boundary.
 
-The browser exposes voice Start, Stop, and Test Bark controls. The voice
-service owns no motion client: it can only call `POST /api/voice/mission` with
-the exact `VOICE COMMAND HEARD` confirmation. The Collie runtime still owns
-freshness checks, class locking, velocity leases, watchdogs, arrival
-classification, and return-home. Oliver's-desk Thor captures the USB
-speakerphone through WendyOS audio when that stream is live; the Go2 microphone
-remains connected as an automatic fallback. The Thor speaker handles spoken
-stage confirmations in either case.
+The browser exposes a typed fruit-command field plus voice Start, Stop, and
+Test Bark controls. Typed labels enter through `POST /api/command` on the voice
+service and use the same bark, preflight, and guarded-mission path as committed
+speech. The voice service owns no motion client: it can only call
+`POST /api/voice/mission` with the exact `VOICE COMMAND HEARD` confirmation.
+The Collie runtime still owns freshness checks, class locking, velocity leases,
+watchdogs, arrival classification, and return-home. Oliver's-desk Thor captures
+the USB speakerphone through WendyOS audio when that stream is live; the Go2
+microphone remains connected as an automatic fallback. The Thor speaker
+handles spoken stage confirmations in either case.

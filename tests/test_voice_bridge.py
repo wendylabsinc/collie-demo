@@ -4,6 +4,9 @@ import sys
 import threading
 import types
 
+import pytest
+from fastapi import HTTPException
+
 sys.modules.setdefault(
     "websocket",
     types.SimpleNamespace(create_connection=lambda *args, **kwargs: None),
@@ -142,3 +145,35 @@ def test_committed_command_stays_busy_until_monitor_finishes(monkeypatch) -> Non
     assert state.snapshot()["mission_busy"] is True
     assert state.snapshot()["last_event"] == "command_ignored_mission_busy"
     assert submitted == ["pear"]
+
+
+def test_typed_command_uses_the_guarded_voice_path(monkeypatch) -> None:
+    state = _fresh_voice_state(monkeypatch)
+    calls: list[str] = []
+
+    def handle(command: str) -> str:
+        calls.append(command)
+        state.update(
+            mission_busy=True,
+            last_heard=command,
+            last_target=command,
+            last_event="guarded_mission_active",
+        )
+        return "guarded_mission_active"
+
+    monkeypatch.setattr(main, "_handle_committed_transcript", handle)
+
+    response = main.typed_command(main.TypedCommandRequest(command="pear"))
+
+    assert calls == ["pear"]
+    assert response["mission_busy"] is True
+    assert response["last_target"] == "pear"
+
+
+@pytest.mark.parametrize("command", ["", "orange", "stop", "call Wendy"])
+def test_typed_command_rejects_non_fruit_commands(command: str) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        main.typed_command(main.TypedCommandRequest(command=command))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Type apple, banana, or pear."
