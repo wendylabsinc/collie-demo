@@ -243,6 +243,19 @@ and center-step checks. The Python reference remains authoritative: a Mojo
 mismatch or runtime error is counted in tracker metrics and can never replace
 the box used by Collie.
 
+The separate `collie-box-shadow` Wendy app serves a read-only A/B monitor on
+port 8106. Its two panes use the same fetched camera image:
+
+- **YOLO / TensorRT** shows the latest detector class, confidence, bounding box,
+  and inference latency from the active Collie app.
+- **KLT + MAX/Mojo** shows the confidence-neutral optical-flow track and the
+  MAX/Mojo box-postprocessing latency. MAX/Mojo does not classify fruit and is
+  not presented as a second detector.
+
+The monitor reports box IoU, center displacement, detector-gap coverage, KLT
+latency, MAX kernel latency, and the resolved MAX device. It has no Unitree,
+DDS, voice, or motion client and reports `control_authority=none_shadow_only`.
+
 Install Modular only in an isolated development environment:
 
 ```bash
