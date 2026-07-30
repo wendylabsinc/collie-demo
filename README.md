@@ -255,6 +255,12 @@ port 8106. Its two panes use the same fetched camera image:
 The monitor reports box IoU, center displacement, detector-gap coverage, KLT
 latency, MAX kernel latency, and the resolved MAX device. It has no Unitree,
 DDS, voice, or motion client and reports `control_authority=none_shadow_only`.
+The Woof deployment currently pins MAX/Mojo to CPU because MAX 26.4 and the
+2026-07-29 nightly both emitted `sm_80` kernels while Woof's Jetson Orin
+requires `sm_87`; those artifacts fail at execution with
+`CUDA_ERROR_NO_BINARY_FOR_GPU`. YOLO remains TensorRT/CUDA. This makes the UI
+valid for output-quality and end-to-end latency comparison, but not a
+like-for-like GPU throughput benchmark.
 
 Install Modular only in an isolated development environment:
 
@@ -284,8 +290,9 @@ COLLIE_BOX_POSTPROCESS_DEVICE=cpu \
 collie-demo
 ```
 
-`COLLIE_BOX_POSTPROCESS_DEVICE=accelerator` is reserved for the later,
-no-motion Woof shadow test. No MAX/Mojo result has control authority.
+`COLLIE_BOX_POSTPROCESS_DEVICE=accelerator` is reserved until a compiled
+artifact is inspected for `sm_87` and successfully executed on Woof. No
+MAX/Mojo result has control authority.
 
 ## Live pointing policy
 

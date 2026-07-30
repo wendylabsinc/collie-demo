@@ -170,7 +170,7 @@ INDEX_HTML = """<!doctype html>
     <article class="panel max">
       <div class="panel-head">
         <h2>KLT + MAX/Mojo tracker</h2>
-        <p>Confidence-neutral optical flow with GPU box postprocessing. Not a detector.</p>
+        <p>Confidence-neutral optical flow with MAX/Mojo box postprocessing. Not a detector.</p>
       </div>
       <img id="max-camera" src="/camera/max.jpg" alt="MAX-assisted tracker view">
       <div class="metrics">
@@ -776,7 +776,7 @@ def main() -> None:
             "COLLIE_SHADOW_SOURCE_URL",
             "http://127.0.0.1:8096",
         ),
-        device=os.environ.get("COLLIE_BOX_POSTPROCESS_DEVICE", "accelerator"),
+        device=os.environ.get("COLLIE_BOX_POSTPROCESS_DEVICE", "cpu"),
         loop_hz=float(os.environ.get("COLLIE_SHADOW_HZ", "12")),
     )
     uvicorn.run(

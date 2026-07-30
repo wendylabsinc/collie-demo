@@ -14,7 +14,7 @@ ENV PATH=/opt/modular/bin:$PATH \
     COLLIE_SHADOW_SOURCE_URL=http://127.0.0.1:8096 \
     COLLIE_SHADOW_PORT=8106 \
     COLLIE_SHADOW_HZ=12 \
-    COLLIE_BOX_POSTPROCESS_DEVICE=accelerator
+    COLLIE_BOX_POSTPROCESS_DEVICE=cpu
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
