@@ -1,6 +1,6 @@
 {
-  "appId": "collie-box-shadow",
-  "version": "0.1.2",
+  "appId": "collie-max-vision",
+  "version": "0.1.0",
   "platform": "linux",
   "entitlements": [
     {
@@ -8,11 +8,8 @@
       "mode": "host"
     },
     {
-      "type": "gpu"
-    },
-    {
       "type": "persist",
-      "name": "collie-box-shadow-cache",
+      "name": "collie-max-vision-cache",
       "path": "/data"
     }
   ]

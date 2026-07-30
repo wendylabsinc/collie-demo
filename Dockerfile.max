@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.6
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV PATH=/opt/modular/bin:$PATH \
+    PYTHONPATH=/app/src \
+    PYTHONUNBUFFERED=1 \
+    PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_EXTRA_INDEX_URL="" \
+    XDG_CACHE_HOME=/data/cache \
+    MODULAR_MAX_CACHE_DIR=/data/max \
+    MODULAR_MAX_SHM_WATERMARK=0.0 \
+    COLLIE_MAX_VISION_SOURCE_URL=http://127.0.0.1:8096 \
+    COLLIE_MAX_VISION_PORT=8107 \
+    COLLIE_MAX_VISION_HZ=12 \
+    COLLIE_MAX_PREDICTION_AGE_S=0.45 \
+    COLLIE_MAX_VISION_DEVICE=cpu
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      libgl1 \
+      libglib2.0-0 \
+      libgomp1 \
+      python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv --system-site-packages /opt/modular \
+    && /opt/modular/bin/pip install --no-cache-dir --upgrade pip uv \
+    && /opt/modular/bin/uv pip install \
+      --python /opt/modular/bin/python \
+      --prerelease allow \
+      --index https://whl.modular.com/nightly/simple/ \
+      modular
+
+WORKDIR /app
+COPY pyproject.toml ./
+RUN mkdir -p src/collie_demo \
+    && touch src/collie_demo/__init__.py \
+    && python3 -m pip install --no-cache-dir .
+COPY src/ src/
+
+EXPOSE 8107
+CMD ["python3", "-m", "collie_demo.max_vision_server"]

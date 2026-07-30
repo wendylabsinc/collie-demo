@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Woof · MAX Vision Lab</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --ink: #effff7;
+      --muted: #91aa9e;
+      --dim: #61756b;
+      --bg: #040907;
+      --panel: rgba(12, 23, 18, .88);
+      --line: rgba(153, 208, 179, .16);
+      --raw: #ffbc54;
+      --max: #68f4a7;
+      --max-soft: rgba(104, 244, 167, .12);
+      --blue: #73b7ff;
+      --danger: #ff7f79;
+    }
+    * { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--bg); }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 14% -12%, rgba(49, 145, 93, .24), transparent 34rem),
+        radial-gradient(circle at 88% 2%, rgba(51, 111, 105, .16), transparent 31rem),
+        linear-gradient(180deg, #07100c 0%, var(--bg) 52%);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .14;
+      background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 75%);
+    }
+    main {
+      position: relative;
+      width: min(1640px, calc(100% - 38px));
+      margin: 0 auto;
+      padding: 30px 0 58px;
+    }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 28px;
+      margin-bottom: 22px;
+    }
+    .eyebrow {
+      margin-bottom: 9px;
+      color: var(--max);
+      font: 800 .74rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .18em;
+    }
+    h1 {
+      max-width: 920px;
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 4.2rem);
+      line-height: .98;
+      letter-spacing: -.055em;
+    }
+    .subtitle {
+      max-width: 780px;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: clamp(.95rem, 1.25vw, 1.13rem);
+      line-height: 1.55;
+    }
+    .status-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 9px;
+      flex: 0 0 auto;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(8, 17, 13, .76);
+      color: var(--muted);
+      font: 760 .74rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .055em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .pill::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
+      content: "";
+    }
+    .pill.good { color: var(--max); border-color: rgba(104,244,167,.34); }
+    .pill.warn { color: var(--raw); border-color: rgba(255,188,84,.34); }
+    .pill.bad { color: var(--danger); border-color: rgba(255,127,121,.34); }
+    .safety {
+      color: #b5c7bd;
+      font-size: .72rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .hero-metrics {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      overflow: hidden;
+      margin-bottom: 18px;
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      background: rgba(11, 22, 17, .73);
+      box-shadow: 0 18px 65px rgba(0,0,0,.2);
+      backdrop-filter: blur(14px);
+    }
+    .metric {
+      min-width: 0;
+      padding: 14px 16px 15px;
+      border-right: 1px solid var(--line);
+    }
+    .metric:last-child { border-right: 0; }
+    .metric span {
+      display: block;
+      overflow: hidden;
+      color: var(--dim);
+      font-size: .68rem;
+      font-weight: 780;
+      letter-spacing: .08em;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .metric strong {
+      display: block;
+      overflow: hidden;
+      margin-top: 7px;
+      color: var(--ink);
+      font: 760 clamp(.9rem, 1.2vw, 1.08rem)/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .metric strong.max { color: var(--max); }
+    .metric strong.raw { color: var(--raw); }
+    .views {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .view {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: 0 22px 80px rgba(0,0,0,.3);
+      backdrop-filter: blur(16px);
+    }
+    .view.max-view {
+      border-color: rgba(104,244,167,.32);
+      box-shadow: 0 22px 90px rgba(14,92,53,.16);
+    }
+    .view-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 96px;
+      padding: 18px 20px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .view h2 {
+      margin: 0;
+      font-size: clamp(1rem, 1.5vw, 1.27rem);
+      letter-spacing: -.02em;
+    }
+    .view.raw-view h2 { color: var(--raw); }
+    .view.max-view h2 { color: var(--max); }
+    .view p {
+      max-width: 590px;
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: .83rem;
+      line-height: 1.45;
+    }
+    .tag {
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 6px 8px;
+      color: var(--dim);
+      font: 740 .64rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+    figure {
+      position: relative;
+      min-height: 260px;
+      margin: 0;
+      background: #000;
+    }
+    figure::after {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border: 1px solid rgba(255,255,255,.04);
+      box-shadow: inset 0 0 70px rgba(0,0,0,.38);
+      content: "";
+    }
+    figure img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+      background: #000;
+    }
+    .view-footer {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-top: 1px solid var(--line);
+    }
+    .view-footer .metric { min-height: 76px; }
+    .explanation {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 19px 20px;
+      background: rgba(10, 21, 16, .78);
+      backdrop-filter: blur(14px);
+    }
+    .card h3 { margin: 0 0 10px; font-size: .92rem; }
+    .flow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 4px 0 3px;
+    }
+    .flow span {
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 9px 11px;
+      color: #bcd1c5;
+      background: rgba(255,255,255,.025);
+      font: 680 .75rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .flow span.active {
+      color: var(--max);
+      border-color: rgba(104,244,167,.28);
+      background: var(--max-soft);
+    }
+    .flow b { color: var(--dim); font-weight: 500; }
+    .legend {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .legend-item {
+      display: flex;
+      gap: 10px;
+      color: var(--muted);
+      font-size: .78rem;
+      line-height: 1.45;
+    }
+    .swatch {
+      flex: 0 0 auto;
+      width: 25px;
+      height: 15px;
+      margin-top: 2px;
+      border: 3px solid var(--max);
+      border-radius: 4px;
+    }
+    .swatch.dashed { border-style: dashed; }
+    .track-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .track-chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 10px;
+      color: var(--muted);
+      background: rgba(255,255,255,.025);
+      font: 680 .72rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .track-chip strong { color: var(--ink); }
+    details {
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(10, 20, 15, .7);
+    }
+    summary {
+      cursor: pointer;
+      padding: 13px 16px;
+      color: var(--dim);
+      font-size: .77rem;
+      font-weight: 700;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    pre {
+      max-height: 360px;
+      overflow: auto;
+      margin: 0;
+      padding: 0 16px 16px;
+      color: #a8c5b5;
+      font: .74rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 1120px) {
+      .hero-metrics { grid-template-columns: repeat(3, 1fr); }
+      .metric:nth-child(3) { border-right: 0; }
+      .metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+    }
+    @media (max-width: 880px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .status-stack { align-items: flex-start; }
+      .views, .explanation { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 580px) {
+      main { width: calc(100% - 18px); padding-top: 18px; }
+      .hero-metrics { grid-template-columns: repeat(2, 1fr); }
+      .metric:nth-child(2n) { border-right: 0; }
+      .metric:nth-child(-n+4) { border-bottom: 1px solid var(--line); }
+      .view-head { flex-direction: column; }
+      .view-footer { grid-template-columns: 1fr; }
+      .view-footer .metric { border-right: 0; border-bottom: 1px solid var(--line); }
+      .legend { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="eyebrow">WOOF · PERCEPTION LAB 01</div>
+      <h1>Raw detection, stabilized by MAX.</h1>
+      <p class="subtitle">
+        One camera and one fruit model, shown two ways. The left is the current
+        TensorRT box. The right is a real MAX Graph with a Mojo temporal-fusion
+        kernel that smooths motion and bridges only short, bounded detector gaps.
+      </p>
+    </div>
+    <div class="status-stack">
+      <div id="live-pill" class="pill warn">Connecting</div>
+      <div class="safety">Read only · zero motion authority</div>
+    </div>
+  </header>
+
+  <section class="hero-metrics" aria-label="live pipeline metrics">
+    <div class="metric"><span>Camera</span><strong id="camera-fps">—</strong></div>
+    <div class="metric"><span>YOLO inference</span><strong id="yolo-ms" class="raw">—</strong></div>
+    <div class="metric"><span>MAX execution</span><strong id="max-ms" class="max">—</strong></div>
+    <div class="metric"><span>MAX device</span><strong id="max-device">—</strong></div>
+    <div class="metric"><span>Visible tracks</span><strong id="track-count">—</strong></div>
+    <div class="metric"><span>Box-step change</span><strong id="jitter-change" class="max">Collecting…</strong></div>
+  </section>
+
+  <section class="views">
+    <article class="view raw-view">
+      <div class="view-head">
+        <div>
+          <h2>Baseline · YOLO / TensorRT</h2>
+          <p>Unmodified class, confidence, and box emitted by the current production detector.</p>
+        </div>
+        <div class="tag">Current</div>
+      </div>
+      <figure><img id="baseline-camera" src="/camera/baseline.jpg" alt="Raw YOLO detector view"></figure>
+      <div class="view-footer">
+        <div class="metric"><span>Detections</span><strong id="raw-count">—</strong></div>
+        <div class="metric"><span>Center-step RMS</span><strong id="raw-jitter" class="raw">—</strong></div>
+        <div class="metric"><span>Detector updates</span><strong id="detector-updates">—</strong></div>
+      </div>
+    </article>
+
+    <article class="view max-view">
+      <div class="view-head">
+        <div>
+          <h2>Fork · MAX + Mojo temporal fusion</h2>
+          <p>Confidence-aware smoothing plus velocity decay. It never creates a class or confidence.</p>
+        </div>
+        <div class="tag">Experimental</div>
+      </div>
+      <figure><img id="max-camera" src="/camera/max.jpg" alt="MAX and Mojo stabilized tracking view"></figure>
+      <div class="view-footer">
+        <div class="metric"><span>MAX tracks</span><strong id="max-count" class="max">—</strong></div>
+        <div class="metric"><span>Center-step RMS</span><strong id="max-jitter" class="max">—</strong></div>
+        <div class="metric"><span>Gap frames bridged</span><strong id="bridged">—</strong></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="explanation">
+    <article class="card">
+      <h3>What is actually running</h3>
+      <div class="flow" aria-label="MAX vision data flow">
+        <span>Go2 camera</span><b>→</b><span>YOLO / TensorRT</span><b>→</b>
+        <span class="active">MAX Graph</span><b>→</b><span class="active">Mojo fusion kernel</span><b>→</b>
+        <span>stabilized display</span>
+      </div>
+      <div id="track-list" class="track-list">
+        <div class="track-chip">Waiting for fruit…</div>
+      </div>
+    </article>
+    <article class="card">
+      <h3>How to read the MAX view</h3>
+      <div class="legend">
+        <div class="legend-item"><span class="swatch"></span><span>Solid box: a fresh YOLO measurement was accepted and fused by MAX.</span></div>
+        <div class="legend-item"><span class="swatch dashed"></span><span>Dashed box: bounded MAX prediction during a brief detector gap. It expires after 450 ms.</span></div>
+      </div>
+    </article>
+  </section>
+
+  <details>
+    <summary>Engineering telemetry</summary>
+    <pre id="telemetry">Connecting…</pre>
+  </details>
+</main>
+<script>
+  const baselineCamera = document.getElementById("baseline-camera");
+  const maxCamera = document.getElementById("max-camera");
+  const telemetry = document.getElementById("telemetry");
+  const el = id => document.getElementById(id);
+  const show = (id, value, fallback = "—") => {
+    el(id).textContent = value === null || value === undefined || value === "" ? fallback : value;
+  };
+  const fixed = (value, digits = 1) =>
+    value === null || value === undefined ? null : Number(value).toFixed(digits);
+  const ms = value => value === null || value === undefined ? "—" : `${fixed(value, 2)} ms`;
+
+  setInterval(() => {
+    const stamp = Date.now();
+    baselineCamera.src = `/camera/baseline.jpg?t=${stamp}`;
+    maxCamera.src = `/camera/max.jpg?t=${stamp}`;
+  }, 110);
+
+  setInterval(async () => {
+    try {
+      const response = await fetch("/api/status", {cache: "no-store"});
+      const data = await response.json();
+      const max = data.max_mojo || {};
+      const quality = data.quality || {};
+      const baseline = data.baseline || {};
+      const vision = data.max_vision || {};
+      const tracks = vision.tracks || [];
+      const detections = baseline.detections || [];
+      const pill = el("live-pill");
+      pill.textContent = data.ok ? "Pipeline live" : "Pipeline waiting";
+      pill.className = `pill ${data.ok ? "good" : data.error ? "bad" : "warn"}`;
+      show("camera-fps", data.source_camera_fps === null ? null : `${fixed(data.source_camera_fps)} FPS`);
+      show("yolo-ms", ms(data.source_inference_ms));
+      show("max-ms", ms(max.last_execution_ms));
+      show("max-device", max.device);
+      show("track-count", `${tracks.length} / 3`);
+      show("raw-count", detections.length);
+      show("max-count", tracks.length);
+      show("detector-updates", vision.detector_updates);
+      show("bridged", vision.bridged_track_frames);
+      show("raw-jitter", quality.raw_box_step_rms_px === null ? null : `${fixed(quality.raw_box_step_rms_px)} px`);
+      show("max-jitter", quality.max_box_step_rms_px === null ? null : `${fixed(quality.max_box_step_rms_px)} px`);
+      const reduction = quality.box_step_reduction_percent;
+      show("jitter-change", reduction === null || reduction === undefined
+        ? "Collecting…" : `${reduction >= 0 ? "↓" : "↑"} ${Math.abs(reduction).toFixed(1)}%`);
+      const list = el("track-list");
+      list.replaceChildren();
+      if (!tracks.length) {
+        const empty = document.createElement("div");
+        empty.className = "track-chip";
+        empty.textContent = "Waiting for apple, banana, or pear…";
+        list.append(empty);
+      } else {
+        for (const track of tracks) {
+          const chip = document.createElement("div");
+          chip.className = "track-chip";
+          const label = document.createElement("strong");
+          label.textContent = track.label.toUpperCase();
+          chip.append(label, ` · ${(track.confidence * 100).toFixed(0)}% · ${track.source.replaceAll("_", " ")}`);
+          list.append(chip);
+        }
+      }
+      telemetry.textContent = JSON.stringify(data, null, 2);
+    } catch (error) {
+      const pill = el("live-pill");
+      pill.textContent = "App unavailable";
+      pill.className = "pill bad";
+      telemetry.textContent = String(error);
+    }
+  }, 250);
+</script>
+</body>
+</html>
