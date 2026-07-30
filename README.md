@@ -294,6 +294,51 @@ collie-demo
 artifact is inspected for `sm_87` and successfully executed on Woof. No
 MAX/Mojo result has control authority.
 
+## Separate MAX vision fork
+
+The `codex/max-vision-fork` worktree contains a separate, read-only Wendy app
+named `collie-max-vision`. It consumes the same `/camera-raw.jpg` frame and the
+same YOLO/TensorRT detections as the production app, but sends up to three
+active fruit tracks through a real MAX Graph and the bundled
+`collie_temporal_fusion` Mojo custom operation.
+
+The Mojo operation:
+
+- predicts the next box from bounded per-coordinate velocity,
+- confidence-weights fresh YOLO measurements,
+- rejects implausible center jumps,
+- smooths accepted box measurements,
+- decays velocity during short detector gaps, and
+- clips every result to the camera frame.
+
+It never creates a class or confidence. Solid boxes in the MAX view are
+fresh-YOLO measurements fused by MAX; dashed boxes are bounded predictions and
+expire after 450 ms. The app has no Unitree, DDS, voice, or motion client and
+reports `control_authority=none_read_only`.
+
+Run the fork locally against Woof:
+
+```bash
+COLLIE_MAX_VISION_SOURCE_URL=http://woof.local:8096 \
+COLLIE_MAX_VISION_DEVICE=cpu \
+COLLIE_MAX_VISION_PORT=8107 \
+python -m collie_demo.max_vision_server
+```
+
+Deploy it separately:
+
+```bash
+wendy --device woof.local run \
+  --dockerfile Dockerfile.max \
+  --detach \
+  --restart-unless-stopped \
+  --yes
+```
+
+The comparison UI is then available at `http://woof.local:8107/`. Keep this
+experimental app stopped during the actual stage run unless its added camera
+fetch/decode/encode load has passed a full rehearsal.
+
 ## Live pointing policy
 
 Open the main UI and use the `Show the real pointing policy` panel:

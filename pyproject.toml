@@ -27,12 +27,13 @@ collie-fruit-webcam = "collie_demo.fruit_webcam:main"
 collie-fruit-ui = "collie_demo.fruit_server:main"
 collie-pointing-policy = "collie_demo.pointing_runner:main"
 collie-box-postprocess-benchmark = "collie_demo.box_postprocess_benchmark:main"
+collie-max-vision = "collie_demo.max_vision_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-collie_demo = ["mojo/**/*.mojo"]
+collie_demo = ["*.html", "mojo/**/*.mojo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
