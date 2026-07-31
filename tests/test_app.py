@@ -282,16 +282,14 @@ def test_pointing_policy_endpoints_are_explicit_and_stoppable(
     with TestClient(create_app(runtime, tmp_path)) as client:  # type: ignore[arg-type]
         prepared = client.post(
             "/api/pointing/prepare",
-            json={"confirmation": "WOOF IS CLEAR TO LIE DOWN"},
+            json={"confirmation": "WOOF IS CLEAR FOR STANDING POINT"},
         )
         assert prepared.status_code == 200
         assert prepared.json()["pointing"]["prepared"] is True
 
         started = client.post(
             "/api/pointing/run",
-            json={
-                "confirmation": "WOOF IS LYING DOWN AND TARGET AREA IS CLEAR"
-            },
+            json={"confirmation": "AREA IS CLEAR AND WOOF MAY MOVE"},
         )
         assert started.status_code == 200
         assert started.json()["pointing"]["active"] is True

@@ -8,3 +8,4 @@ models/*
 !models/pointing/
 models/pointing/*
 !models/pointing/policy_actor_42500.jit
+!models/pointing/locked_point_actor.jit

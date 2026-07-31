@@ -16,6 +16,9 @@ class CameraFrame:
     # Unitree already sends a JPEG. Keeping the original bytes lets the web
     # stream forward frames without avoidable full-resolution decode/encode.
     source_jpeg: bytes | None
+    # Opaque producer connection identity. A change invalidates every
+    # camera-derived lock even when local frame IDs remain monotonic.
+    stream_generation: str | None
     _width: int
     _height: int
     _decode_lock: Lock
@@ -28,6 +31,7 @@ class CameraFrame:
         source_jpeg: bytes | None = None,
         width: int | None = None,
         height: int | None = None,
+        stream_generation: str | None = None,
     ) -> None:
         if bgr is None and source_jpeg is None:
             raise ValueError("a camera frame requires an image or source JPEG")
@@ -41,6 +45,9 @@ class CameraFrame:
         self.captured_monotonic_s = float(captured_monotonic_s)
         self._bgr = bgr
         self.source_jpeg = source_jpeg
+        self.stream_generation = (
+            None if stream_generation is None else str(stream_generation)
+        )
         self._width = int(width)
         self._height = int(height)
         self._decode_lock = Lock()

@@ -8,46 +8,60 @@ YOLOE-11m checkpoint whose visual prompt embeddings were baked from the three
 physical stage props. The Woof image runs a TensorRT 10.7 FP16 engine exported
 on its Orin; the original PyTorch checkpoint remains in the image as the source
 artifact.
-Frames come directly from Unitree's public `VideoClient`; inference,
-annotation, motion supervision, and the browser UI all run locally in the
-robot container. No Roboflow service, hosted inference API, Hugging Face key,
-or internet connection is used for vision inference. The optional voice service
-streams microphone PCM to ElevenLabs Scribe v2 Realtime; motion control and
-fruit inference remain on Woof.
+The voice service owns one native Go2 WebRTC peer and shares its video frames
+through a local, freshness-bounded camera broker while using the same peer for
+the Go2 microphone and native bark. Inference, annotation, motion supervision,
+and the browser UI all run locally in robot containers. No Roboflow service,
+hosted inference API, Hugging Face key, or internet connection is used for
+vision inference. The optional voice service streams microphone PCM to
+ElevenLabs Scribe v2 Realtime; motion control and fruit inference remain on
+Woof.
+
+An optional companion stack in [`nav2/`](nav2/README.md) bridges Woof sensors
+read-only into ROS domain 30, builds a map with RTAB-Map, and plans the return
+with Nav2. The stage image now selects that backend by default, while the
+separate gateway remains fail-closed until the real Hesai mount transform and
+live mapping pipeline are qualified on Woof.
 
 ## Current behavior
 
 - Bundles the local PyTorch source checkpoint and Woof-specific TensorRT FP16
   engine; runtime inference does not call a hosted API.
 - Detects only the three visual-prompt classes: apple, banana, and pear.
-- Bundles the hash-pinned iteration-42,500 TorchScript pointing actor and
-  exposes a guarded browser flow: manually select a fresh fruit box, request
-  Unitree `StandDown`, then run one second of the real full-gain policy. The
-  actor receives the exact normalized selected `xyxy` box plus live Go2
-  proprioception; it cannot silently switch to another detection.
+- Bundles the hash-pinned `locked_point_v19` iteration-73,000 TorchScript
+  balance actor and exposes a guarded browser flow. The actor consumes 47
+  values and controls nine support joints while the front-right point follows
+  its deterministic training schedule. It receives the exact normalized
+  selected `xyxy` box plus live Go2 proprioception and cannot silently switch
+  to another detection.
 - Keeps the pointing runner behind the same single-motion-owner boundary as
   following and navigation. The UI exposes Stop, target changes are rejected
   during low-level control, target loss aborts, and every exit path attempts to
   return to the captured StandDown pose and restore Sport mode.
-- Retains the 0.30 rad roll, 0.35 rad pitch, 12-unit estimated-torque,
-  2 rad/s joint-speed, 0.60 rad/s target-rate, low-state freshness, policy
+- Retains the 0.30 rad roll, 0.35 rad pitch, 22 Nm estimated-torque,
+  4 rad/s joint-speed, 0.60 rad/s target-rate, low-state freshness, policy
   checksum, unchanged target-lock, and 800 ms bbox-age guards. The stage runner
-  contains no roll-guard bypass. The visible full-gain segment is capped at one
-  second because the earlier three-second hardware test reached the roll guard
-  after 67 policy ticks.
+  contains no roll-guard bypass. The six-second skill includes one second of
+  setup and a one-second deterministic point ramp.
 - Runs a separate persistent Go2 WebRTC microphone service on port 8098. It
   accepts only deterministic bare `apple|banana|pear` commands, the legacy
   `Find [the] ...` form, plus `stop|abort|cancel`; arbitrary transcripts can
   never become motor commands.
+- Uses that voice service as the sole native Go2 WebRTC peer for video, mic,
+  and AudioHub bark. The main runtime consumes broadcast JPEG snapshots from
+  the local broker; it never opens Unitree `VideoClient` in the stage profile.
+  A reconnect rotates the stream generation, clears old frames, aborts any
+  active mission, and requires a new fruit command before motion can resume.
 - A committed bare `apple`, `banana`, or `pear` command (with `pair` accepted
   as a Scribe homophone for pear) plays the user-supplied native AudioHub bark,
   stores only the requested YOLO class, and starts the normal guarded mission.
   The voice-only path skips the initial Hello and recognition Stretch gestures.
   The voice bridge automatically releases Go only after the mission reports a
   fresh multi-frame class lock and all stage-health checks remain ready.
-- When the arrival lay-down enters its five-second hold, the voice bridge
-  plays exactly one AudioHub bark. It keeps later fruit commands gated until the
-  return-home controller reports completion or the mission safely aborts.
+- The autonomous arrival uses Unitree's stock `StandDown`, holds for five
+  seconds, and calls `StandUp` before returning Home. The experimental
+  standing-point policy remains available only through its manual UI panel and
+  is not part of the full fruit sequence.
 - Once repeated detections confirm a fruit at the lower camera edge, a final
   10 cm nudge that factory avoidance blocks stops cleanly and continues into the
   same StandDown sequence, even when local odometry reports no additional
@@ -137,34 +151,22 @@ fruit inference remain on Woof.
   `COLLIE_MATCH_STRETCH_ENABLED=0` to skip the gesture;
   `COLLIE_MATCH_STRETCH_SETTLE_S` and `COLLIE_MATCH_REACQUIRE_TIMEOUT_S` control
   the animation wait and fresh-frame reacquisition window.
-- After the fruit has reached the lower camera region and then disappears, Woof
-  first releases every locomotion owner and stops. The stage image calls the
-  stock `StandDown`, holds the completed lay-down posture for five seconds,
-  calls the paired Unitree `StandUp`, and only then starts the odometry-based
-  return home.
-  Operator Stop cancels the mission and prevents the return leg from arming.
-  Configure the sequence with `COLLIE_ARRIVAL_REST_ENABLED` and
-  `COLLIE_ARRIVAL_REST_DURATION_S`. The older stock `Hello` arrival
-  acknowledgement remains available behind `COLLIE_ARRIVAL_HELLO_ENABLED`.
-- For the configured arrival-pointing class, three distinct detector frames in
-  the near region can trigger a different
-  handoff before the box disappears: Woof stops, enters `StandDown`, runs the
-  hash-pinned one-second bounding-box policy, and verifies that Sport mode was
-  restored. If return-home is enabled it then calls `StandUp` before
-  reacquiring the factory obstacle-avoidance lease. A policy guard, stale box,
-  timeout, or failed controller restoration aborts the mission. Telemetry calls
-  this a reach attempt and reports contact as `unverified`; there is no
-  independent paw-contact sensor. Configure it with
-  `COLLIE_ARRIVAL_POINTING_ENABLED`, `COLLIE_ARRIVAL_POINTING_LABEL`, and
-  `COLLIE_ARRIVAL_POINTING_TIMEOUT_S`. It is disabled in the stage image; the
-  manual pointing panel remains available for supervised engineering tests.
+- The experimental manual pointing panel still exposes the guarded
+  `locked_point_v19` runner for later work. It is isolated from the autonomous
+  stage sequence; that sequence now stays entirely in Unitree Sport mode for
+  the arrival posture and return transition.
 - Keeps persistent fruit memory separate from the ephemeral visual track. A
   normal target-loss stop therefore cannot erase what Woof was shown before it
   turned around.
-- Uses fresh `rt/sportmodestate` IMU yaw and local `(x, y)` odometry. The mission
-  refuses to start or aborts if heading or the position required for return-home
-  becomes stale; it never estimates a 180-degree turn or return distance from
-  elapsed time alone.
+- Supports two explicit return backends. The diagnostic `local_odometry`
+  fallback averages fresh `rt/sportmodestate` local `(x, y,
+  yaw)` samples and performs the original short-range return. The `nav2`
+  backend captures Home from a stable `map -> base_link` sample and delegates
+  the complete obstacle-aware return to one `NavigateToPose` goal. Both reject
+  unstable Home capture, stale pose, travel outside the configured three-metre
+  stage envelope, lack of progress, and timeout. Success always requires a
+  measured position error of at most 10 cm and heading error of at most 5
+  degrees.
 - Runs the initial measured turn through the factory `ObstaclesAvoidClient`
   path that has physically actuated Woof, with forward and lateral motion fixed
   at zero. The controller confirms the avoidance switch, takes remote API
@@ -192,36 +194,47 @@ fruit inference remain on Woof.
   at most 8 seconds and tolerates three consecutive detector misses; these
   limits preserve the original 2.4 m reach while reducing distance travelled
   between detector updates.
-- Captures Home from fresh local odometry when the operator starts the mission.
-  After the fruit is reached, the return controller first uses the measured
-  watchdog-protected yaw-only Sport lease to face Home; translation is
-  impossible during this in-place correction. It then reacquires the factory
-  obstacle-avoidance channel, drives at up to 0.30 m/s, and uses the same
-  yaw-only handoff to restore the original heading after reaching Home. It
-  stops within a 10 cm position tolerance and aborts on stale pose, a
-  45-second timeout, a stalled heading correction, or less than 4 cm of
-  translational progress in six seconds. Those progress limits match the
-  slower displacement observed behind the factory avoidance controller while
-  retaining a bounded fail-stop. This is a short-range open-stage return
-  controller, not a global map planner.
+- For `nav2`, the companion service prefers `/hesai/points`, converts the fresh
+  cloud to `/scan`, uses RTAB-Map for `map -> odom`, and supplies live local and
+  global obstacle costmaps to Nav2. Nav2 commands are relayed back through
+  `collie-demo`; no second process publishes Unitree motion. The runtime uses
+  one exclusive forward/yaw Sport lease so Nav2 remains the only steering
+  planner, clamps reverse/lateral motion to zero, and retains the independent
+  350 ms `StopMove` watchdog. Home capture and motion remain locked until the
+  physical `base_link -> hesai_lidar` transform, odometry, scan, map,
+  localization, and `NavigateToPose` server are all fresh and validated.
+- The map backend aborts if localization, the map, or the Hesai-derived scan
+  becomes stale; if Nav2 rejects or aborts the path; if no velocity heartbeat
+  arrives; if less than 4 cm of progress occurs in six seconds; or if final
+  measured error exceeds 10 cm or 5 degrees. This layering follows
+  [`autonomous-go2-inspection`](https://github.com/Manas-arumalla/autonomous-go2-inspection),
+  while keeping Home captured per round and preserving `collie-demo` as the
+  only hardware motion owner.
 
 Every class emitted by the local model is selectable from the detection list.
 Whale color detection and whale motion targets have been removed.
 
 ## Live pointing policy
 
-Open the main UI and use the `Show the real pointing policy` panel:
+Open the main UI and use the `Experimental pointing policy (manual only)` panel:
 
 1. Click `Manual Select` on the fruit whose bounding box should drive the paw.
-2. Clear the robot and target area, then click `Lay Woof Down`.
+2. Clear the robot and target area, then click `Prepare Standing Point`.
 3. Wait for the camera and selected box to settle. The Run button remains
    disabled until the target is stable, freshly YOLO-verified, and above its
    configured class threshold.
-4. Click `Run 1.0s Point`. The endpoint returns immediately while the robot
-   process runs the 50 Hz actor and 500 Hz low-level publisher.
+4. Click `Run 6.0s Standing Point`. The endpoint returns immediately while the
+   robot process runs the 50 Hz actor and 500 Hz low-level publisher.
 5. Use either `Stop & Restore Sport Mode` or the global `Stop Now`. Stop sends
    an interrupt to the policy runner and waits for its guarded joint return and
    Sport-controller restoration; it never force-kills the motor owner.
+
+This integration is locally validated but not yet hardware-qualified. The
+upstream `locked_point_v19` handoff report records a clean low-level lift but a
+guarded abort after 34 policy ticks when estimated torque reached 22.190 Nm
+against the 22 Nm ceiling. Do not describe the point as stage-ready until a
+supervised run completes the full gesture and recovery without weakening that
+guard.
 
 The policy endpoints are:
 
@@ -258,13 +271,13 @@ python tools/build_visual_prompt_weights.py \
   --prompt pear=812,775,884,855
 ```
 
-The current baked checkpoint is 59,997,395 bytes with SHA-256
+The current baked detector checkpoint is 59,997,395 bytes with SHA-256
 `7c75fcc5d449a8b00785dfd0c955cbf11bd6bde6a5ede1ea8d34c097413bc53e`.
 Detector model files and camera captures are excluded from Git, but the Docker
-build context includes the baked detector checkpoint. The 454 KiB pointing
+build context includes the baked detector checkpoint. The 443 KiB standing
 actor is intentionally committed at
-`models/pointing/policy_actor_42500.jit`; startup rejects it unless its SHA-256
-is `5ac866353150b82309a083827aefd2f43e779a5ba67c8d617a5b612b89fe1938`.
+`models/pointing/locked_point_actor.jit`; startup rejects it unless its SHA-256
+is `2e4d1bc727370148f34af6f271c2b264209116a7f8ce3cd3970619507317729e`.
 
 ## Local test
 
@@ -295,8 +308,9 @@ collie-fruit-ui \
 
 ## Deploy to Woof
 
-The on-robot image reads the Unitree camera and motion clients over the network
-interface selected by `GO2_NETWORK_INTERFACE`, and binds the UI to port 8096:
+The voice image reads Go2 camera/microphone media through one WebRTC peer; the
+main image reads brokered frames locally and retains the sole motion client on
+the interface selected by `GO2_NETWORK_INTERFACE`. The UI binds to port 8096:
 
 ```sh
 wendy --device woof.local run --yes --detach --restart-on-failure
@@ -308,6 +322,7 @@ Verify the actual deployed runtime before considering it ready:
 wendy --device woof.local device ps --json
 curl http://woof.local:8096/api/status
 curl http://woof.local:8098/api/status
+curl http://woof.local:8098/api/camera/status
 ```
 
 Then open `http://woof.local:8096/`. A healthy status response must report the
@@ -329,12 +344,22 @@ python tools/benchmark_fruit_models.py \
 ```
 
 The stage UI uses `/camera-stream.mjpg`, a persistent stream that forwards the
-JPEG already supplied by Unitree instead of opening a new request and
-re-encoding every displayed frame. `/api/status` reports `camera_fps`, frame
-dimensions, frame age, and the independent YOLO inference time. Camera capture
-defaults to 30 Hz (`COLLIE_CAMERA_HZ`) while legacy annotated snapshots are
-limited to 5 Hz (`COLLIE_ANNOTATED_HZ`) so display fluidity is not gated by
-inference or full-resolution JPEG encoding.
+JPEG already encoded once by the voice WebRTC broker. The main runtime requests
+the latest fresh frame from `GET /api/camera/frame.jpg`; broker transport health
+is exposed at `GET /api/camera/status` and inside the voice `/api/status`.
+`/api/status` on the main runtime reports `camera_fps`, dimensions, frame age,
+the broker generation, and independent YOLO inference time. Capture consumption
+is capped at 10 Hz (`COLLIE_CAMERA_HZ`), and frames at least 750 ms old are never
+served or accepted. Legacy annotated snapshots are limited to 5 Hz
+(`COLLIE_ANNOTATED_HZ`) so display fluidity is not gated by inference. The
+`camera_rpc` block keeps persistent broker request, success, error, source-age,
+and generation telemetry. Set `COLLIE_CAMERA_SOURCE=unitree_rpc` only for the
+explicit legacy diagnostic path; it is not the stage default.
+
+The single-peer broker is locally test-validated but is not yet physically
+qualified on Woof. Treat the camera issue as open until a live 30-minute soak
+and forced peer-loss/recovery test show fresh video while mic and bark remain
+usable; mission actuation must be tested separately under operator supervision.
 
 The stage control sequence is: click `Select` beside the desired detection, wait for
 the Follow button to enable, then click `Follow Selected Fruit` once. `STOP
@@ -352,13 +377,23 @@ shows `STAGE READY`.
    `WAITING FOR GO`.
 5. Confirm the target and path are still clear, then press `Go to Fruit`. Woof
    revalidates the saved class in fresh frames, hands it to the guarded follower,
-   and returns to the start pose using local odometry.
+   and returns to the start pose using the configured return backend.
 6. Use `STOP NOW` at any time. `Reset Round` erases the saved class.
 
 The mission endpoints are `POST /api/memory/capture`, `DELETE /api/memory`,
 `GET /api/memory/reference.jpg`, `POST /api/demo/start`, and
 `POST /api/demo/go`, and `POST /api/demo/stop`. `/api/status` reports `memory`,
 `mission`, heading age, class-lock state, turn progress, and the terminal reason.
+
+The stage image defaults to `COLLIE_RETURN_BACKEND=nav2`. At mission start,
+`collie-demo` asks the separate `collie-nav2` service to capture a stable
+`map`-frame Home pose. After the arrival posture completes, the runtime submits
+that saved pose to Nav2 and does not report mission success until both the
+position and heading tolerances are independently verified. If localization,
+the map, the Hesai scan, Nav2 lifecycle state, or the motion handoff is
+unhealthy, the sequence aborts and remains stopped. Set
+`COLLIE_RETURN_BACKEND=local_odometry` only as an explicit diagnostic fallback;
+it does not provide global obstacle-detour planning.
 
 The feature is controlled by `COLLIE_MEMORY_DEMO_ENABLED` and
 `COLLIE_AUTONOMOUS_TURN_ENABLED`. Matching, turn speed/angle, search limits,
@@ -372,10 +407,11 @@ either feature does not remove or weaken the manual follower and STOP path.
 2. Clear the full turn, approach, and return paths.
 3. Say exactly `apple`, `banana`, or `pear`, or type one of those labels into
    the voice panel and press `Run [fruit] Full Sequence`.
-4. Woof barks, captures Home, turns, searches for that YOLO class without
-   running Hello or Stretch, automatically revalidates and approaches it, lies
-   down, barks once, remains down for five seconds, stands, and returns to
-   Home's saved position and heading.
+4. Woof barks, captures Home from a stable localization window, turns,
+   searches for that YOLO class without running Hello or Stretch, automatically
+   revalidates and approaches it, lies down for five seconds, stands up, and
+   returns to Home's saved position and heading. When `nav2` is enabled, that
+   return is a planned map-frame path around live costmap obstacles.
 5. After return-home completes, the voice status returns to `LISTENING` and a
    new fruit word can start the next round.
 6. Say `Stop`, `Abort mission`, or press `STOP NOW` to invoke the same emergency

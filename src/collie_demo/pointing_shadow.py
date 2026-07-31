@@ -21,18 +21,27 @@ from urllib.request import urlopen
 import torch
 
 from .pointing_contract import (
+    LOCKED_POINT_ACTION_SIZE,
+    LOCKED_POINT_OBSERVATION_SIZE,
     ISAAC_JOINT_ORDER,
-    actor_action_to_joint_target,
-    build_actor_observation,
+    build_locked_point_observation,
     joint_limit_violations,
+    locked_point_joint_targets,
     projected_gravity_wxyz,
     selected_target_bbox_from_status,
     standdown_error_rad,
     unitree_to_isaac,
 )
+from .standing_pose import (
+    LOCKED_POINT_RAMP_S,
+    LOCKED_POINT_SETUP_S,
+    locked_point_phase,
+)
 
 
-EXPECTED_POLICY_SHA256 = "5ac866353150b82309a083827aefd2f43e779a5ba67c8d617a5b612b89fe1938"
+EXPECTED_POLICY_SHA256 = (
+    "2e4d1bc727370148f34af6f271c2b264209116a7f8ce3cd3970619507317729e"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,6 +153,7 @@ class BBoxProvider:
             "confidence": 1.0 if synthetic_bbox else None,
             "received_at": time.monotonic() if synthetic_bbox else None,
             "frame_age_s": 0.0 if synthetic_bbox else None,
+            "source": "synthetic" if synthetic_bbox else None,
             "error": None,
             "held": False,
         }
@@ -182,6 +192,7 @@ class BBoxProvider:
                     "lock_id": selected["lock_id"],
                     "received_at": time.monotonic(),
                     "frame_age_s": selected["frame_age_s"],
+                    "source": selected.get("source", "selected_tracker"),
                     "error": None,
                     "held": False,
                 }
@@ -207,6 +218,7 @@ class BBoxProvider:
                         "lock_id": None,
                         "received_at": now,
                         "frame_age_s": None,
+                        "source": None,
                         "error": str(exc),
                         "held": False,
                     }
@@ -242,7 +254,10 @@ def main() -> int:
     # control loop.  The first cold inference on Woof measured about 100 ms;
     # warm calls are around 3 ms.
     with torch.inference_mode():
-        warm_observation = torch.zeros((1, 49), dtype=torch.float32)
+        warm_observation = torch.zeros(
+            (1, LOCKED_POINT_OBSERVATION_SIZE),
+            dtype=torch.float32,
+        )
         for _ in range(50):
             policy(warm_observation)
     synthetic_bbox = parse_synthetic_bbox(args.synthetic_bbox)
@@ -257,9 +272,10 @@ def main() -> int:
         live.wait()
         tick_count = int(round(args.duration * args.rate))
         period_s = 1.0 / args.rate
-        previous_action = (0.0,) * 12
+        previous_action = (0.0,) * LOCKED_POINT_ACTION_SIZE
         records: list[dict[str, Any]] = []
         deadline = time.perf_counter()
+        started_at = time.monotonic()
 
         with torch.inference_mode():
             for tick in range(tick_count):
@@ -270,13 +286,19 @@ def main() -> int:
                 q_isaac = unitree_to_isaac(low["q"])
                 dq_isaac = unitree_to_isaac(low["dq"])
                 gravity = projected_gravity_wxyz(low["quaternion"])
-                observation = build_actor_observation(
+                phase = locked_point_phase(
+                    now - started_at,
+                    LOCKED_POINT_SETUP_S,
+                    LOCKED_POINT_RAMP_S,
+                )
+                observation = build_locked_point_observation(
                     base_linear_velocity_body=sport["velocity"],
                     base_angular_velocity_body=low["gyroscope"],
                     gravity_body=gravity,
                     joint_position_isaac=q_isaac,
                     joint_velocity_isaac=dq_isaac,
                     previous_action=previous_action,
+                    point_phase=phase,
                     bbox_xyxy_normalized=box["bbox"],
                 )
 
@@ -284,9 +306,14 @@ def main() -> int:
                 output = policy(torch.tensor(observation).unsqueeze(0)).squeeze(0)
                 inference_ms = (time.perf_counter() - inference_started) * 1000.0
                 action = tuple(float(value) for value in output)
-                if len(action) != 12 or not all(math.isfinite(value) for value in action):
+                if len(action) != LOCKED_POINT_ACTION_SIZE or not all(
+                    math.isfinite(value) for value in action
+                ):
                     raise RuntimeError("actor returned an invalid action")
-                target = actor_action_to_joint_target(action)
+                target = locked_point_joint_targets(
+                    action,
+                    point_phase=phase,
+                )
                 violations = joint_limit_violations(target)
                 standdown_rms, standdown_max = standdown_error_rad(q_isaac)
                 records.append(
@@ -307,6 +334,7 @@ def main() -> int:
                         "dq_isaac": dq_isaac,
                         "rpy": low["rpy"],
                         "action": action,
+                        "point_phase": phase,
                         "raw_target_isaac": target,
                         "joint_limit_violations": violations,
                         "standdown_rms_error_rad": standdown_rms,

@@ -17,8 +17,8 @@ import uuid
 from .pointing_shadow import EXPECTED_POLICY_SHA256, sha256_file
 
 
-POINTING_PREPARE_CONFIRMATION = "WOOF IS CLEAR TO LIE DOWN"
-POINTING_RUN_CONFIRMATION = "WOOF IS LYING DOWN AND TARGET AREA IS CLEAR"
+POINTING_PREPARE_CONFIRMATION = "WOOF IS CLEAR FOR STANDING POINT"
+POINTING_RUN_CONFIRMATION = "AREA IS CLEAR AND WOOF MAY MOVE"
 
 
 class PointingPolicyError(RuntimeError):
@@ -31,23 +31,34 @@ class PointingPolicyConfig:
     policy_path: Path
     network_interface: str = "enP8p1s0"
     status_url: str = "http://127.0.0.1:8096/api/status"
-    duration_s: float = 1.0
+    duration_s: float = 6.0
     action_gain: float = 1.0
     maximum_target_rate_rad_s: float = 0.60
-    kp: float = 25.0
-    kd: float = 0.5
+    kp: float = 60.0
+    kd: float = 5.0
+    standup_seconds: float = 3.0
+    standup_kp: float = 60.0
+    standup_kd: float = 5.0
+    direct_standing_handoff: bool = True
     output_directory: Path = Path("/tmp/collie-pointing")
     runner_module: str = "collie_demo.pointing_runner"
 
     def __post_init__(self) -> None:
-        if not (0.1 <= self.duration_s <= 1.0):
-            raise ValueError("stage pointing duration must be between 0.1 and 1.0 s")
+        if not (2.0 <= self.duration_s <= 8.0):
+            raise ValueError("standing-point duration must be between 2.0 and 8.0 s")
         if not (0.0 < self.action_gain <= 1.0):
             raise ValueError("pointing action gain must be in (0, 1]")
         if not (0.05 <= self.maximum_target_rate_rad_s <= 0.60):
             raise ValueError("pointing target rate must be in [0.05, 0.60] rad/s")
-        if not (0.0 < self.kp <= 25.0 and 0.0 < self.kd <= 1.0):
+        if not (0.0 < self.kp <= 60.0 and 0.0 < self.kd <= 5.0):
             raise ValueError("pointing gains exceed the validated envelope")
+        if not (2.0 <= self.standup_seconds <= 5.0):
+            raise ValueError("standing-point lift must take between 2.0 and 5.0 s")
+        if not (
+            0.0 < self.standup_kp <= 60.0
+            and 0.0 < self.standup_kd <= 5.0
+        ):
+            raise ValueError("standing-point lift gains exceed the validated envelope")
 
 
 class PointingPolicyManager:
@@ -130,6 +141,13 @@ class PointingPolicyManager:
             "phase": self._phase,
             "target_label": self._target_label,
             "duration_s": self.config.duration_s,
+            "policy_kind": "locked_point_v19",
+            "gesture": "standing_front_right_point",
+            "handoff_mode": (
+                "sport_standing_direct"
+                if self.config.direct_standing_handoff
+                else "standdown_then_lift"
+            ),
             "policy_rate_hz": 50,
             "motor_publish_rate_hz": 500,
             "started_age_s": None
@@ -148,8 +166,8 @@ class PointingPolicyManager:
             "safety": {
                 "roll_guard_rad": 0.30,
                 "pitch_guard_rad": 0.35,
-                "maximum_estimated_torque": 12.0,
-                "maximum_joint_speed_rad_s": 2.0,
+                "maximum_estimated_torque": 22.0,
+                "maximum_joint_speed_rad_s": 4.0,
                 "maximum_target_rate_rad_s": (
                     self.config.maximum_target_rate_rad_s
                 ),
@@ -179,7 +197,9 @@ class PointingPolicyManager:
             if self.active:
                 raise PointingPolicyError("pointing policy is already active")
             if self._prepared_at is None:
-                raise PointingPolicyError("lay Woof down before running the policy")
+                raise PointingPolicyError(
+                    "prepare the guarded standing-point handoff first"
+                )
             self._target_label = target_label
             self._phase = "starting"
             self._started_at = time.monotonic()
@@ -250,7 +270,7 @@ class PointingPolicyManager:
         minimum_confidence: float,
         output_path: Path,
     ) -> list[str]:
-        return [
+        command = [
             sys.executable,
             "-m",
             self.config.runner_module,
@@ -274,13 +294,22 @@ class PointingPolicyManager:
             f"{self.config.kp:.3f}",
             "--kd",
             f"{self.config.kd:.3f}",
+            "--standup-seconds",
+            f"{self.config.standup_seconds:.3f}",
+            "--standup-kp",
+            f"{self.config.standup_kp:.3f}",
+            "--standup-kd",
+            f"{self.config.standup_kd:.3f}",
             "--output",
             str(output_path),
             "--full-power",
             "--execute",
             "--confirm",
-            "WOOF IS LYING DOWN AND FULL POLICY AREA IS CLEAR",
+            "AREA IS CLEAR AND WOOF MAY MOVE",
         ]
+        if self.config.direct_standing_handoff:
+            command.append("--direct-standing-handoff")
+        return command
 
     async def _run(self, target_label: str, minimum_confidence: float) -> None:
         self.config.output_directory.mkdir(parents=True, exist_ok=True)
@@ -389,6 +418,13 @@ class PointingPolicyManager:
             "policy_ticks": report.get("policy_ticks"),
             "requested_duration_s": report.get("requested_duration_s"),
             "controller_restored": report.get("controller_restored"),
+            "handoff_mode": report.get("handoff_mode"),
+            "recovery_used_standdown": report.get(
+                "recovery_used_standdown"
+            ),
+            "final_standing_rms_error_rad": report.get(
+                "final_standing_rms_error_rad"
+            ),
             "final_standdown_rms_error_rad": report.get(
                 "final_standdown_rms_error_rad"
             ),
@@ -398,6 +434,12 @@ class PointingPolicyManager:
             ),
             "maximum_estimated_torque": (
                 None if not torques else round(max(torques), 4)
+            ),
+            "peak_estimated_torque_nm": report.get(
+                "peak_estimated_torque_nm"
+            ),
+            "worst_droop_outside_envelope_rad": report.get(
+                "worst_droop_outside_envelope_rad"
             ),
             "confidence_range": (
                 None

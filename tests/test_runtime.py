@@ -8,12 +8,14 @@ from typing import Callable
 
 import cv2
 import numpy as np
+import pytest
 
 from collie_demo.controller import ApproachConfig, ApproachController
 from collie_demo.fruit import FruitDetection
 from collie_demo.heading import HeadingSample, normalize_angle
-from collie_demo.mission import MissionConfig
-from collie_demo.motion import UnitreeMotionAdapter
+from collie_demo.mission import MissionConfig, MissionPhase
+from collie_demo.motion import MotionConfig, UnitreeMotionAdapter
+from collie_demo.nav2_return import MapHomeCapture, Nav2ReturnStatus
 from collie_demo.runtime import (
     ARM_CONFIRMATION,
     DEMO_CONFIRMATION,
@@ -28,6 +30,55 @@ from collie_demo.types import CameraFrame
 from test_motion import FakeAvoidance, FakeSport
 
 
+class FakeNav2Return:
+    def __init__(self, statuses: list[Nav2ReturnStatus]) -> None:
+        self.statuses = list(statuses)
+        self.capture_calls = 0
+        self.start_calls = 0
+        self.cancel_reasons: list[str] = []
+
+    async def health(self) -> dict[str, object]:
+        return {"ok": True, "ready": True}
+
+    async def capture_home(
+        self,
+        *,
+        duration_s: float,
+        maximum_position_span_m: float,
+        maximum_yaw_span_rad: float,
+    ) -> MapHomeCapture:
+        del duration_s, maximum_position_span_m, maximum_yaw_span_rad
+        self.capture_calls += 1
+        return MapHomeCapture(
+            x_m=1.0,
+            y_m=-2.0,
+            yaw_rad=0.5,
+            frame_id="map",
+            sample_count=12,
+            maximum_position_span_m=0.01,
+            maximum_yaw_span_rad=math.radians(1.0),
+        )
+
+    async def start_return(
+        self,
+        *,
+        position_tolerance_m: float,
+        heading_tolerance_rad: float,
+        timeout_s: float,
+    ) -> Nav2ReturnStatus:
+        assert position_tolerance_m == pytest.approx(0.10)
+        assert heading_tolerance_rad == pytest.approx(math.radians(5.0))
+        assert timeout_s > 0.0
+        self.start_calls += 1
+        return self.statuses.pop(0)
+
+    async def status(self) -> Nav2ReturnStatus:
+        return self.statuses.pop(0)
+
+    async def cancel(self, reason: str) -> None:
+        self.cancel_reasons.append(reason)
+
+
 class StaticFruitCamera:
     def __init__(self) -> None:
         self.frame_id = 0
@@ -36,6 +87,37 @@ class StaticFruitCamera:
         self.frame_id += 1
         image = np.full((720, 1280, 3), 120, dtype=np.uint8)
         return CameraFrame(self.frame_id, time.monotonic(), image)
+
+
+class TelemetryFruitCamera(StaticFruitCamera):
+    def telemetry(self) -> dict[str, object]:
+        return {
+            "source": "unitree_video_client_rpc",
+            "timeout_count": 2,
+            "consecutive_timeouts": 0,
+        }
+
+
+class GenerationFruitCamera(StaticFruitCamera):
+    def __init__(self) -> None:
+        super().__init__()
+        self.generation = "voice-process.1"
+
+    def read(self) -> CameraFrame:
+        self.frame_id += 1
+        image = np.full((720, 1280, 3), 120, dtype=np.uint8)
+        return CameraFrame(
+            self.frame_id,
+            time.monotonic(),
+            image,
+            stream_generation=self.generation,
+        )
+
+    def telemetry(self) -> dict[str, object]:
+        return {
+            "source": "voice_webrtc_camera_broker",
+            "generation": self.generation,
+        }
 
 
 class OneBadFrameCamera(StaticFruitCamera):
@@ -235,6 +317,48 @@ class NearPearDetector(NearBananaDetector):
         ]
 
 
+class OneApproachStallCamera(NearBananaCamera):
+    """Pause one camera read only after the first forward command."""
+
+    def __init__(self, avoidance: FakeAvoidance) -> None:
+        super().__init__()
+        self.avoidance = avoidance
+        self.stall_complete = False
+
+    def read(self) -> CameraFrame:
+        if (
+            not self.stall_complete
+            and any(move[0] > 0.0 for move in self.avoidance.moves)
+        ):
+            time.sleep(0.16)
+            self.stall_complete = True
+        return super().read()
+
+
+class PearAfterCameraStallDetector(NearPearDetector):
+    """Stay visible after reacquisition, then leave through the lower edge."""
+
+    def __init__(self, camera: OneApproachStallCamera) -> None:
+        self.camera = camera
+        self.after_stall_calls = 0
+
+    def detect(self, _image: object) -> list[FruitDetection]:
+        if not self.camera.stall_complete:
+            return [
+                FruitDetection(
+                    class_id=0,
+                    label="pear",
+                    confidence=0.93,
+                    bbox_xyxy=(580, 330, 700, 480),
+                    center=(640, 405),
+                )
+            ]
+        self.after_stall_calls += 1
+        if self.after_stall_calls <= 3:
+            return super().detect(_image)
+        return []
+
+
 class MotionCoupledHeading:
     def __init__(self, avoidance: FakeAvoidance, sport: FakeSport | None = None) -> None:
         self.avoidance = avoidance
@@ -294,6 +418,24 @@ class MotionCoupledPose(MotionCoupledHeading):
         )
 
 
+class OscillatingPiBoundaryPose:
+    """Keep yaw straddling the +/-pi error boundary without real progress."""
+
+    def __init__(self) -> None:
+        self.samples = 0
+
+    def start(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def status(self) -> HeadingSample:
+        self.samples += 1
+        yaw = math.radians(0.5 if self.samples % 2 else -0.5)
+        return HeadingSample(yaw, 0.0, True)
+
+
 class OutwardStallingPose(MotionCoupledPose):
     """Allow a little outward travel, then block until commands return home."""
 
@@ -319,6 +461,156 @@ class OutwardStallingPose(MotionCoupledPose):
         ):
             self.x_m = previous_x
             self.y_m = previous_y
+            return HeadingSample(
+                self.yaw,
+                0.0,
+                True,
+                None,
+                self.x_m,
+                self.y_m,
+                True,
+                None,
+            )
+        return sample
+
+
+class DriftingStoppedPose(MotionCoupledPose):
+    def status(self) -> HeadingSample:
+        self.x_m += 0.01
+        return HeadingSample(
+            self.yaw,
+            0.0,
+            True,
+            None,
+            self.x_m,
+            self.y_m,
+            True,
+            None,
+        )
+
+
+class FruitBlockedReturnPose(MotionCoupledPose):
+    """Suppress avoidance yaw until Woof has backed away from the fruit."""
+
+    def __init__(
+        self,
+        avoidance: FakeAvoidance,
+        sport: FakeSport | None = None,
+        *,
+        required_clearance_m: float = 0.20,
+    ) -> None:
+        super().__init__(avoidance, sport)
+        self.required_clearance_m = required_clearance_m
+        self.start_x_m = self.x_m
+        self.start_y_m = self.y_m
+
+    def mark_start(self) -> None:
+        self.start_x_m = self.x_m
+        self.start_y_m = self.y_m
+
+    def status(self) -> HeadingSample:
+        previous_yaw = self.yaw
+        sample = super().status()
+        displacement = math.hypot(
+            self.x_m - self.start_x_m,
+            self.y_m - self.start_y_m,
+        )
+        avoidance_yaw = (
+            self.avoidance.moves[-1][2] if self.avoidance.moves else 0.0
+        )
+        if avoidance_yaw and displacement < self.required_clearance_m:
+            self.yaw = previous_yaw
+            return HeadingSample(
+                self.yaw,
+                0.0,
+                True,
+                None,
+                self.x_m,
+                self.y_m,
+                True,
+                None,
+            )
+        return sample
+
+
+class PostStandUpSettlingReturnPose(MotionCoupledPose):
+    """Drift briefly after a posture skill, then obey locomotion commands."""
+
+    def __init__(
+        self,
+        avoidance: FakeAvoidance,
+        sport: FakeSport | None = None,
+    ) -> None:
+        super().__init__(avoidance, sport)
+        self.settling_samples_remaining = 4
+        self.first_turn_x_m: float | None = None
+
+    def status(self) -> HeadingSample:
+        if (
+            self.first_turn_x_m is None
+            and self.avoidance.moves
+            and abs(self.avoidance.moves[-1][2]) > 0.0
+        ):
+            self.first_turn_x_m = self.x_m
+        sample = super().status()
+        if self.settling_samples_remaining:
+            self.settling_samples_remaining -= 1
+            self.x_m += 0.015
+            return HeadingSample(
+                self.yaw,
+                0.0,
+                True,
+                None,
+                self.x_m,
+                self.y_m,
+                True,
+                None,
+            )
+        return sample
+
+
+class PostRestTurnHandoffPose(MotionCoupledPose):
+    """Ignore yaw until a fresh StandUp/BalanceStand recovery is issued."""
+
+    def __init__(
+        self,
+        avoidance: FakeAvoidance,
+        sport: FakeSport,
+    ) -> None:
+        super().__init__(avoidance, sport)
+        self.blocked_turn_samples = 0
+
+    def status(self) -> HeadingSample:
+        previous_yaw = self.yaw
+        sample = super().status()
+        avoidance_yaw = (
+            self.avoidance.moves[-1][2] if self.avoidance.moves else 0.0
+        )
+        assert self.sport is not None
+        if avoidance_yaw and self.sport.balance_stand_calls == 0:
+            self.blocked_turn_samples += 1
+            self.yaw = previous_yaw
+            return HeadingSample(
+                self.yaw,
+                0.0,
+                True,
+                None,
+                self.x_m,
+                self.y_m,
+                True,
+                None,
+            )
+        return sample
+
+
+class LateralOnlyClearancePose(MotionCoupledPose):
+    """Move sideways under reverse commands without rearward progress."""
+
+    def status(self) -> HeadingSample:
+        sample = super().status()
+        if self.avoidance.moves and self.avoidance.moves[-1][0] < 0.0:
+            self.x_m = 0.45
+            self.y_m = 0.06
             return HeadingSample(
                 self.yaw,
                 0.0,
@@ -374,7 +666,7 @@ class FakePointingPolicy:
             "active": self.active,
             "prepared": self.prepared,
             "phase": self.phase,
-            "duration_s": 1.0,
+            "duration_s": 6.0,
             "error": None,
             "last_report": self.last_report,
         }
@@ -383,7 +675,7 @@ class FakePointingPolicy:
         self, *, target_label: str, minimum_confidence: float
     ) -> dict[str, object]:
         if not self.prepared:
-            raise AssertionError("pointing started without StandDown preparation")
+            raise AssertionError("pointing started without handoff preparation")
         self.started = (target_label, minimum_confidence)
         self.active = True
         self.phase = "running"
@@ -412,6 +704,114 @@ class FakePointingPolicy:
 
     async def close(self) -> None:
         await self.stop()
+
+
+def test_runtime_exposes_camera_rpc_telemetry() -> None:
+    async def scenario() -> None:
+        runtime = CollieRuntime(
+            camera=TelemetryFruitCamera(),
+            controller=ApproachController(),
+            motion=None,
+            motion_enabled=False,
+            allow_unranged_forward=False,
+            loop_hz=60.0,
+        )
+        await runtime.start()
+        try:
+            await asyncio.sleep(0.03)
+            status = await runtime.status()
+            assert status["camera_rpc"] == {
+                "source": "unitree_video_client_rpc",
+                "timeout_count": 2,
+                "consecutive_timeouts": 0,
+            }
+            assert status["camera_stream"] == "sdk_jpeg_passthrough"
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_camera_generation_change_stops_and_invalidates_old_target() -> None:
+    async def scenario() -> None:
+        camera = GenerationFruitCamera()
+        avoidance = FakeAvoidance()
+        runtime = CollieRuntime(
+            camera=camera,
+            controller=ApproachController(
+                ApproachConfig(
+                    stable_frames_required=2,
+                    maximum_target_age_s=0.75,
+                )
+            ),
+            motion=UnitreeMotionAdapter(FakeSport(), avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=FakeProduceDetector(),
+            loop_hz=60.0,
+            maximum_produce_age_s=0.75,
+        )
+        await runtime.start()
+        mission_wait = asyncio.Event()
+
+        async def pending_mission() -> None:
+            await mission_wait.wait()
+
+        try:
+            for _ in range(100):
+                status = await runtime.status()
+                if status["produce"] and status["produce"]["detections"]:
+                    break
+                await asyncio.sleep(0.01)
+            await runtime.select_target("apple", (140, 250), confirmed_visible_frames=2)
+            await runtime.start_follow(ARM_CONFIRMATION)
+            for _ in range(100):
+                status = await runtime.status()
+                if status["follow_active"]:
+                    break
+                await asyncio.sleep(0.01)
+            assert status["armed"] is True
+            old_lock_id = status["target_lock_id"]
+            runtime._mission.phase = MissionPhase.APPROACHING
+            runtime._mission.reason = "test_mission_active"
+            runtime._mission_task = asyncio.create_task(pending_mission())
+
+            camera.generation = "voice-process.2"
+            for _ in range(200):
+                status = await runtime.status()
+                if status["command"]["reason"] == "camera_generation_changed":
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("camera generation change was not handled")
+
+            assert status["camera_stream_generation"] == "voice-process.2"
+            assert status["camera_stream"] == "webrtc_broker_jpeg_passthrough"
+            assert status["armed"] is False
+            assert status["follow_active"] is False
+            assert status["selected_target_name"] is None
+            assert status["selected_target"] is None
+            assert status["target_lock_id"] is None
+            assert runtime._target_lock_id > int(old_lock_id)
+            assert status["mission"]["phase"] == "aborted"
+            assert status["mission"]["reason"] == "camera_generation_changed"
+            assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+            await asyncio.sleep(0.05)
+            later = await runtime.status()
+            assert later["armed"] is False
+            assert later["selected_target_name"] is None
+            assert later["mission"]["phase"] == "aborted"
+            assert later["mission"]["reason"] == "camera_generation_changed"
+            with pytest.raises(
+                RuntimeCommandError,
+                match="select a detected fruit first",
+            ):
+                await runtime.start_follow(ARM_CONFIRMATION)
+        finally:
+            mission_wait.set()
+            await runtime.close()
+
+    asyncio.run(scenario())
 
 
 def test_runtime_requires_confirmation_then_pulses_forward() -> None:
@@ -516,9 +916,9 @@ def test_pointing_ui_flow_prepares_locks_and_stops_one_motion_owner() -> None:
             await asyncio.sleep(0.10)
 
             prepared = await runtime.prepare_pointing(
-                "WOOF IS CLEAR TO LIE DOWN"
+                "WOOF IS CLEAR FOR STANDING POINT"
             )
-            assert sport.standdown_calls == 1
+            assert sport.standdown_calls == 0
             assert prepared["pointing"]["prepared"] is True
             for _ in range(100):
                 prepared = await runtime.status()
@@ -528,7 +928,7 @@ def test_pointing_ui_flow_prepares_locks_and_stops_one_motion_owner() -> None:
             assert prepared["pointing"]["can_run"] is True
 
             started = await runtime.start_pointing(
-                "WOOF IS LYING DOWN AND TARGET AREA IS CLEAR"
+                "AREA IS CLEAR AND WOOF MAY MOVE"
             )
             assert pointing.started == ("banana", 0.5)
             assert started["pointing"]["active"] is True
@@ -547,6 +947,29 @@ def test_pointing_ui_flow_prepares_locks_and_stops_one_motion_owner() -> None:
             assert stopped["motion_owner"] is None
         finally:
             await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_active_pointing_runner_owns_fresh_bbox_failure_stop() -> None:
+    async def scenario() -> None:
+        pointing = FakePointingPolicy()
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(FakeSport(), FakeAvoidance()),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=FakeProduceDetector(),
+            pointing=pointing,  # type: ignore[arg-type]
+        )
+        pointing.active = True
+        pointing.phase = "running"
+
+        await runtime._handle_produce_revalidation_failure()
+
+        assert pointing.active is True
+        assert pointing.phase == "running"
 
     asyncio.run(scenario())
 
@@ -586,6 +1009,46 @@ def test_navigation_owner_accepts_bounded_commands_without_a_fruit() -> None:
                 pass
             else:
                 raise AssertionError("fruit pulse stole the navigation lease")
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_nav2_navigation_owner_uses_direct_sport_only_when_health_is_fresh() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=motion,
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            mission_config=MissionConfig(return_backend="nav2"),
+            nav2_return=FakeNav2Return([]),
+            loop_hz=60.0,
+        )
+        await runtime.start()
+        try:
+            for _ in range(100):
+                status = await runtime.status()
+                if status["mission"]["nav2_health"].get("ready"):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("Nav2 health never became ready")
+
+            armed = await runtime.navigation_arm(
+                NAVIGATION_ARM_CONFIRMATION
+            )
+            commanded = await runtime.navigation_command(0.08, 0.20)
+
+            assert armed["motion_mode"] == "direct_navigation"
+            assert commanded["command"]["forward_mps"] == 0.08
+            assert commanded["command"]["yaw_rps"] == 0.20
+            assert sport.moves[-1] == (0.08, 0.0, 0.20)
+            assert avoidance.moves == []
         finally:
             await runtime.close()
 
@@ -1289,11 +1752,56 @@ def test_return_home_demo_refuses_to_start_without_fresh_local_position() -> Non
     asyncio.run(scenario())
 
 
-def test_return_home_reorients_directly_before_avoidance_translation() -> None:
+def test_return_home_refuses_to_capture_a_drifting_start_pose() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        runtime = CollieRuntime(
+            camera=NearBananaCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=NearBananaDetector(),
+            loop_hz=60.0,
+            heading_provider=DriftingStoppedPose(avoidance, sport),
+            mission_config=MissionConfig(
+                enabled=True,
+                autonomous_turn_enabled=True,
+                direct_turn_enabled=True,
+                return_home_enabled=True,
+                return_pose_capture_duration_s=0.02,
+                return_pose_capture_max_drift_m=0.001,
+                capture_timeout_s=0.6,
+            ),
+        )
+        await runtime.start()
+        try:
+            for _ in range(100):
+                if (await runtime.status())["produce"]["detections"]:
+                    break
+                await asyncio.sleep(0.01)
+            await runtime.remember_target("banana", (640, 645))
+
+            with pytest.raises(
+                RuntimeCommandError,
+                match="cannot capture Home: local odometry drifted",
+            ):
+                await runtime.start_demo(DEMO_CONFIRMATION)
+
+            status = await runtime.status()
+            assert status["mission"]["active"] is False
+            assert status["armed"] is False
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_return_home_uses_configured_avoidance_turn_before_translation() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
         pose = MotionCoupledPose(avoidance, sport)
-        pose.x_m = 0.15
+        pose.x_m = 0.45
         pose.y_m = 0.0
         pose.yaw = 0.0
         runtime = CollieRuntime(
@@ -1318,18 +1826,277 @@ def test_return_home_reorients_directly_before_avoidance_translation() -> None:
         await runtime.start()
         try:
             # Home is behind Woof, and its saved heading points back along the
-            # same short stage path. The return must turn under the yaw-only
-            # lease before obstacle-protected translation begins.
+            # same short stage path. With direct turn disabled, both the
+            # measured turn and translation must use the proven avoidance
+            # command path.
             runtime._home_pose = (0.0, 0.0, math.pi)
             await runtime._return_home()
 
             status = await runtime.status()
             assert status["mission"]["return_home_status"] == "complete"
             assert status["mission"]["return_distance_m"] <= 0.02
-            assert any(abs(move[2]) > 0.0 for move in sport.moves)
+            assert (
+                status["mission"]["return_clearance_status"]
+                == "skipped_for_normal_turn"
+            )
+            assert status["mission"]["return_clearance_progress_m"] == 0.0
+            assert not any(abs(move[2]) > 0.0 for move in sport.moves)
+            first_turn = next(
+                index
+                for index, move in enumerate(avoidance.moves)
+                if move[0] == 0.0 and abs(move[2]) > 0.0
+            )
+            first_forward = next(
+                index
+                for index, move in enumerate(avoidance.moves)
+                if move[0] > 0.0
+            )
+            assert first_turn < first_forward
+            assert not any(move[0] < 0.0 for move in avoidance.moves)
+            assert any(
+                move[0] == 0.0 and abs(move[2]) > 0.0
+                for move in avoidance.moves
+            )
             assert any(move[0] > 0.0 for move in avoidance.moves)
             assert status["armed"] is False
             assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_return_home_waits_for_post_standup_odometry_before_turning() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = PostStandUpSettlingReturnPose(avoidance, sport)
+        pose.x_m = 0.45
+        pose.y_m = 0.0
+        pose.yaw = 0.0
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=False,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_arrival_tolerance_m=0.02,
+                return_heading_tolerance_rad=0.10,
+                return_heading_gate_rad=0.55,
+                return_forward_mps=0.08,
+                return_timeout_s=3.0,
+                return_stall_timeout_s=0.75,
+                return_stall_min_progress_m=0.005,
+                return_pose_settle_duration_s=0.06,
+                return_pose_settle_timeout_s=0.6,
+                return_pose_settle_max_drift_m=0.005,
+            ),
+        )
+        await runtime.start()
+        try:
+            runtime._home_pose = (0.0, 0.0, math.pi)
+            await runtime._return_home()
+
+            status = await runtime.status()
+            assert pose.settling_samples_remaining == 0
+            assert pose.first_turn_x_m == pytest.approx(0.51, abs=0.002)
+            assert (
+                status["mission"]["return_clearance_status"]
+                == "skipped_for_normal_turn"
+            )
+            assert status["mission"]["return_home_status"] == "complete"
+            assert status["armed"] is False
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_return_home_recovers_one_unresponsive_post_rest_turn_handoff() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = PostRestTurnHandoffPose(avoidance, sport)
+        pose.x_m = 0.45
+        pose.y_m = 0.0
+        pose.yaw = 0.0
+        pose.simulation_speed = 2.0
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(
+                sport,
+                avoidance,
+                MotionConfig(maximum_yaw_rps=0.8),
+            ),
+            motion_enabled=True,
+            allow_unranged_forward=False,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_arrival_tolerance_m=0.02,
+                return_heading_tolerance_rad=0.05,
+                return_heading_gate_rad=0.55,
+                return_forward_mps=0.08,
+                return_yaw_gain=1.2,
+                return_turn_minimum_yaw_rps=0.35,
+                return_turn_response_timeout_s=0.08,
+                return_turn_response_min_progress_rad=0.005,
+                return_turn_recovery_settle_s=0.001,
+                return_timeout_s=7.0,
+                return_stall_timeout_s=0.75,
+                return_stall_min_progress_m=0.005,
+                return_pose_settle_duration_s=0.02,
+                return_pose_settle_timeout_s=0.3,
+                return_pose_settle_max_drift_m=0.005,
+                turn_rate_rps=0.8,
+                turn_stall_timeout_s=0.5,
+            ),
+        )
+        await runtime.start()
+        try:
+            runtime._home_pose = (0.0, 0.0, math.pi)
+            await runtime._return_home()
+
+            status = await runtime.status()
+            assert pose.blocked_turn_samples > 0
+            assert sport.stand_up_calls == 1
+            assert sport.balance_stand_calls == 1
+            assert status["mission"]["return_turn_recovery_count"] == 1
+            assert status["mission"]["return_turn_status"] == "complete"
+            assert status["mission"]["return_home_status"] == "complete"
+            assert status["armed"] is False
+            assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_return_turn_uses_minimum_yaw_floor_near_target() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = MotionCoupledPose(avoidance, sport)
+        pose.simulation_speed = 0.5
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(
+                sport,
+                avoidance,
+                MotionConfig(maximum_yaw_rps=0.8),
+            ),
+            motion_enabled=True,
+            allow_unranged_forward=False,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                return_heading_tolerance_rad=0.02,
+                return_yaw_gain=0.1,
+                return_turn_minimum_yaw_rps=0.35,
+                return_turn_response_timeout_s=0.5,
+                return_turn_response_min_progress_rad=0.0001,
+                return_turn_recovery_settle_s=0.001,
+                return_pose_settle_duration_s=0.02,
+                return_pose_settle_timeout_s=0.3,
+                turn_rate_rps=0.8,
+                turn_stall_timeout_s=0.5,
+                turn_stall_min_progress_rad=0.03,
+            ),
+        )
+        await runtime.start()
+        try:
+            await runtime._orient_for_return(
+                0.15,
+                deadline=time.monotonic() + 2.0,
+                stage="final_heading",
+            )
+
+            yaw_commands = [
+                move[2] for move in avoidance.moves if move[2] != 0.0
+            ]
+            assert yaw_commands
+            assert yaw_commands[0] == pytest.approx(0.35)
+            assert runtime._mission.return_turn_status == "complete"
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_return_home_normal_turn_never_requests_reverse_clearance() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = MotionCoupledPose(avoidance, sport)
+        pose.x_m = 0.45
+        pose.y_m = 0.0
+        pose.yaw = 0.0
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=False,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_arrival_tolerance_m=0.02,
+                return_pose_settle_duration_s=0.06,
+                return_pose_settle_timeout_s=0.3,
+                return_pose_settle_max_drift_m=0.005,
+                return_timeout_s=3.0,
+            ),
+        )
+        await runtime.start()
+        try:
+            runtime._home_pose = (0.0, 0.0, math.pi)
+            await runtime._return_home()
+            status = await runtime.status()
+            assert status["mission"]["return_home_status"] == "complete"
+            assert (
+                status["mission"]["return_clearance_status"]
+                == "skipped_for_normal_turn"
+            )
+            assert status["mission"]["return_clearance_progress_m"] == 0.0
+            assert not any(move[0] < 0.0 for move in avoidance.moves)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_return_home_pi_boundary_never_reverses_yaw_command() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=False,
+            heading_provider=OscillatingPiBoundaryPose(),
+            mission_config=MissionConfig(
+                direct_turn_enabled=True,
+                return_home_enabled=True,
+                return_heading_tolerance_rad=math.radians(5.0),
+                turn_stall_timeout_s=0.12,
+                turn_stall_min_progress_rad=math.radians(5.0),
+            ),
+        )
+        await runtime.start()
+        try:
+            with pytest.raises(RuntimeCommandError, match="turn stalled"):
+                await runtime._orient_for_return(
+                    math.pi,
+                    deadline=time.monotonic() + 1.0,
+                    stage="departure",
+                )
+
+            commanded_yaw = [
+                move[2] for move in sport.moves if move[2] != 0.0
+            ]
+            assert commanded_yaw
+            assert all(yaw > 0.0 for yaw in commanded_yaw)
         finally:
             await runtime.close()
 
@@ -1461,7 +2228,7 @@ def test_memory_demo_turns_searches_and_reuses_guarded_follow() -> None:
             assert all(move[0] == 0.0 and move[1] == 0.0 for move in sport.moves)
             assert all(move[2] != 0.20 for move in avoidance.moves)
             assert any(move[0] > 0.0 for move in avoidance.moves)
-            assert any(abs(move[2]) > 0.0 for move in avoidance.moves)
+            assert not any(move[0] < 0.0 for move in avoidance.moves)
             assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
         finally:
             await runtime.close()
@@ -1560,7 +2327,7 @@ def test_pear_mission_hands_live_near_bbox_to_pointing_policy() -> None:
             )
             assert status["mission"]["final_approach_status"] == "not_requested"
             assert pointing.started == ("pear", 0.2)
-            assert sport.standdown_calls == 1
+            assert sport.standdown_calls == 0
             assert sport.stand_up_calls == 1
             assert sport.hello_calls == 0
             assert any(move[0] > 0.0 for move in avoidance.moves)
@@ -1568,6 +2335,286 @@ def test_pear_mission_hands_live_near_bbox_to_pointing_policy() -> None:
             assert status["armed"] is False
         finally:
             await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_voice_approach_pauses_for_camera_stall_and_resumes_same_class() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        camera = OneApproachStallCamera(avoidance)
+        pose = MotionCoupledPose(avoidance, sport)
+        runtime = CollieRuntime(
+            camera=camera,
+            controller=ApproachController(
+                ApproachConfig(
+                    stable_frames_required=2,
+                    maximum_target_age_s=0.05,
+                    forward_mps=0.08,
+                    forward_budget_s=0.5,
+                )
+            ),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            produce_detector=PearAfterCameraStallDetector(camera),
+            loop_hz=60.0,
+            maximum_produce_age_s=0.05,
+            follow_period_s=0.01,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                enabled=True,
+                autonomous_turn_enabled=True,
+                direct_turn_enabled=True,
+                match_reacquire_timeout_s=0.001,
+                approach_reacquire_attempts=2,
+                approach_reacquire_timeout_s=0.6,
+                final_approach_distance_m=0.02,
+                final_approach_timeout_s=0.5,
+                final_approach_stall_timeout_s=0.2,
+                match_confirmations_required=2,
+                approach_misses_allowed=2,
+                near_confirmations_required=1,
+                turn_angle_rad=0.35,
+                turn_rate_rps=0.20,
+                turn_tolerance_rad=0.05,
+                turn_timeout_s=1.0,
+                search_rate_rps=0.10,
+                search_sweep_rad=1.0,
+                search_timeout_s=1.0,
+            ),
+        )
+        await runtime.start()
+        try:
+            for _ in range(100):
+                if (await runtime.status())["produce"]["detections"]:
+                    break
+                await asyncio.sleep(0.01)
+            await runtime.start_voice_mission(
+                "pear",
+                "pear",
+                VOICE_MISSION_CONFIRMATION,
+            )
+
+            for _ in range(500):
+                status = await runtime.status()
+                if status["mission"]["phase"] in {"success", "aborted"}:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("camera-stall mission did not finish")
+
+            assert status["mission"]["phase"] == "success", repr(
+                (status["mission"], status["last_error"])
+            )
+            assert camera.stall_complete is True
+            assert status["mission"]["approach_pause_count"] == 1
+            assert status["mission"]["approach_pause_status"] == "resumed"
+            positive_indices = [
+                index
+                for index, move in enumerate(avoidance.moves)
+                if move[0] > 0.0
+            ]
+            assert len(positive_indices) >= 2
+            assert (
+                status["mission"]["final_approach_status"]
+                == "skipped_near_target"
+            )
+            assert (
+                status["mission"]["final_approach_commanded_distance_m"]
+                == 0.0
+            )
+            assert status["armed"] is False
+            assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def nav2_status(
+    state: str,
+    *,
+    distance_m: float | None,
+    position_error_m: float | None = None,
+    heading_error_deg: float | None = None,
+    reason: str | None = None,
+) -> Nav2ReturnStatus:
+    return Nav2ReturnStatus(
+        state=state,
+        reason=reason or state,
+        distance_remaining_m=distance_m,
+        position_error_m=position_error_m,
+        heading_error_rad=(
+            None
+            if heading_error_deg is None
+            else math.radians(heading_error_deg)
+        ),
+        navigation_time_s=0.5,
+        recoveries=0,
+        localization_healthy=True,
+        map_healthy=True,
+        scan_healthy=True,
+        motion_armed=state == "running",
+    )
+
+
+def test_nav2_return_uses_one_goal_and_requires_measured_goal_tolerances() -> None:
+    async def scenario() -> None:
+        nav2 = FakeNav2Return(
+            [
+                nav2_status("running", distance_m=0.80),
+                nav2_status("running", distance_m=0.35),
+                nav2_status(
+                    "succeeded",
+                    distance_m=0.04,
+                    position_error_m=0.04,
+                    heading_error_deg=2.0,
+                ),
+            ]
+        )
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=None,
+            motion_enabled=False,
+            allow_unranged_forward=False,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_backend="nav2",
+                return_arrival_tolerance_m=0.10,
+                return_heading_tolerance_rad=math.radians(5.0),
+                nav2_poll_period_s=0.001,
+            ),
+            nav2_return=nav2,
+        )
+        runtime._map_home = MapHomeCapture(
+            x_m=0.0,
+            y_m=0.0,
+            yaw_rad=0.0,
+            frame_id="map",
+            sample_count=10,
+            maximum_position_span_m=0.01,
+            maximum_yaw_span_rad=math.radians(1.0),
+        )
+
+        await runtime._return_home()
+        status = await runtime.status()
+
+        assert nav2.start_calls == 1
+        assert nav2.cancel_reasons == []
+        assert status["mission"]["return_home_status"] == "complete"
+        assert status["mission"]["return_backend"] == "nav2"
+        assert status["mission"]["nav2_status"]["state"] == "succeeded"
+        assert status["mission"]["return_distance_m"] == pytest.approx(0.04)
+
+    asyncio.run(scenario())
+
+
+def test_nav2_return_prealigns_to_local_home_before_submitting_goal() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        pose = MotionCoupledPose(avoidance, sport)
+        pose.x_m = 0.0
+        pose.y_m = 1.0
+        pose.yaw = 0.0
+        nav2 = FakeNav2Return(
+            [
+                nav2_status(
+                    "succeeded",
+                    distance_m=0.04,
+                    position_error_m=0.04,
+                    heading_error_deg=2.0,
+                )
+            ]
+        )
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=UnitreeMotionAdapter(sport, avoidance),
+            motion_enabled=True,
+            allow_unranged_forward=True,
+            heading_provider=pose,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_backend="nav2",
+                return_arrival_tolerance_m=0.10,
+                return_heading_tolerance_rad=math.radians(5.0),
+                return_timeout_s=3.0,
+                return_pose_settle_duration_s=0.05,
+                return_pose_settle_timeout_s=0.5,
+                nav2_poll_period_s=0.001,
+            ),
+            nav2_return=nav2,
+        )
+        runtime._home_pose = (0.0, 0.0, 0.0)
+        runtime._map_home = MapHomeCapture(
+            x_m=0.0,
+            y_m=0.0,
+            yaw_rad=0.0,
+            frame_id="map",
+            sample_count=10,
+            maximum_position_span_m=0.01,
+            maximum_yaw_span_rad=math.radians(1.0),
+        )
+
+        await runtime.start()
+        try:
+            await runtime._return_home()
+            status = await runtime.status()
+
+            assert nav2.start_calls == 1
+            assert any(move[2] < 0.0 for move in sport.moves)
+            assert status["mission"]["return_turn_status"] == (
+                "prealigned_for_nav2"
+            )
+            assert status["mission"]["return_home_status"] == "complete"
+        finally:
+            await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_nav2_return_rejects_false_success_outside_heading_tolerance() -> None:
+    async def scenario() -> None:
+        nav2 = FakeNav2Return(
+            [
+                nav2_status(
+                    "succeeded",
+                    distance_m=0.04,
+                    position_error_m=0.04,
+                    heading_error_deg=9.0,
+                )
+            ]
+        )
+        runtime = CollieRuntime(
+            camera=StaticFruitCamera(),
+            controller=ApproachController(),
+            motion=None,
+            motion_enabled=False,
+            allow_unranged_forward=False,
+            mission_config=MissionConfig(
+                return_home_enabled=True,
+                return_backend="nav2",
+                return_arrival_tolerance_m=0.10,
+                return_heading_tolerance_rad=math.radians(5.0),
+            ),
+            nav2_return=nav2,
+        )
+        runtime._map_home = MapHomeCapture(
+            x_m=0.0,
+            y_m=0.0,
+            yaw_rad=0.0,
+            frame_id="map",
+            sample_count=10,
+            maximum_position_span_m=0.01,
+            maximum_yaw_span_rad=math.radians(1.0),
+        )
+
+        with pytest.raises(
+            RuntimeCommandError, match="outside the Home heading tolerance"
+        ):
+            await runtime._return_home()
 
     asyncio.run(scenario())
 
@@ -1600,7 +2647,9 @@ def test_voice_mission_sets_class_releases_go_and_returns_home() -> None:
                 direct_turn_enabled=True,
                 match_stretch_enabled=True,
                 match_stretch_settle_s=0.0,
-                match_reacquire_timeout_s=1.0,
+                # Voice auto-Go must reuse the fresh search lock instead of
+                # requiring another detector frame at this handoff.
+                match_reacquire_timeout_s=0.001,
                 arrival_hello_enabled=True,
                 arrival_hello_settle_s=0.0,
                 arrival_rest_enabled=True,

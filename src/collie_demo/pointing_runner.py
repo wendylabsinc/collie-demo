@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run a deliberately reduced Go2 pointing-policy hardware proof.
+"""Run the guarded ``locked_point_v19`` standing-point policy on a Go2.
 
-This is not the full-strength stage skill.  It requires an explicitly selected
-Collie target, verifies Woof is in the measured StandDown pose, warms the actor,
-hands off from Sport mode, and applies only a small, rate-limited fraction of
-the actor target.  Every exit path attempts to return to the captured
-StandDown pose and restore Unitree's ``mcf`` Sport controller.
+The runner requires an explicitly selected Collie target.  Its stage path
+continuously publishes Woof's measured Sport-standing pose before releasing
+``mcf``, then runs the 47-input/9-action balance policy while the front-right
+leg follows its deterministic point schedule.  Every exit path restores
+Unitree's ``mcf`` Sport controller; firmware that refuses a standing-to-standing
+controller transfer uses a controlled StandDown/StandUp recovery.
 """
 
 from __future__ import annotations
@@ -16,23 +17,25 @@ import math
 from pathlib import Path
 import signal
 import struct
-from threading import Event
+from threading import Event, Lock, Thread
 import time
 from typing import Any, Sequence
 
 import torch
 
 from .pointing_contract import (
-    ISAAC_GROUNDED_SIT_RAD,
+    ISAAC_GROUNDED_STAND_RAD,
     ISAAC_JOINT_ORDER,
-    FULL_POLICY_MAX_DELTA_RAD,
-    FULL_POLICY_MIN_DELTA_RAD,
-    REDUCED_PROOF_MIN_DELTA_RAD,
-    REDUCED_PROOF_MAX_DELTA_RAD,
-    actor_action_to_joint_target,
-    build_actor_observation,
+    LOCKED_POINT_ACTION_SIZE,
+    LOCKED_POINT_MAX_DELTA_RAD,
+    LOCKED_POINT_MIN_DELTA_RAD,
+    LOCKED_POINT_OBSERVATION_SIZE,
+    WOOF_BUILTIN_STANDDOWN_RAD,
+    build_locked_point_observation,
     guarded_policy_target,
     isaac_to_unitree,
+    joint_limit_violations,
+    locked_point_joint_targets,
     projected_gravity_wxyz,
     standdown_error_rad,
     unitree_to_isaac,
@@ -43,10 +46,17 @@ from .pointing_shadow import (
     LiveState,
     sha256_file,
 )
+from .standing_pose import (
+    LOCKED_POINT_RAMP_S,
+    LOCKED_POINT_SETUP_S,
+    locked_point_phase,
+)
 
 
 PUBLISH_RATE_HZ = 500.0
 POLICY_RATE_HZ = 50.0
+COMMAND_TRACKING_SLACK_RAD = 0.45
+POLICY_TORQUE_GUARD_NM = 22.0
 POS_STOP_F = 2.146e9
 VEL_STOP_F = 16000.0
 
@@ -62,11 +72,22 @@ def parse_args() -> argparse.Namespace:
         help="the explicit Collie target lock that this run must retain",
     )
     parser.add_argument("--minimum-confidence", type=float, default=0.5)
-    parser.add_argument("--duration", type=float, default=1.0)
-    parser.add_argument("--action-gain", type=float, default=0.15)
-    parser.add_argument("--max-rate-rad-s", type=float, default=0.18)
-    parser.add_argument("--kp", type=float, default=5.0)
-    parser.add_argument("--kd", type=float, default=1.0)
+    parser.add_argument("--duration", type=float, default=6.0)
+    parser.add_argument("--action-gain", type=float, default=1.0)
+    parser.add_argument("--max-rate-rad-s", type=float, default=0.60)
+    parser.add_argument("--kp", type=float, default=60.0)
+    parser.add_argument("--kd", type=float, default=5.0)
+    parser.add_argument("--standup-seconds", type=float, default=3.0)
+    parser.add_argument("--standup-kp", type=float, default=60.0)
+    parser.add_argument("--standup-kd", type=float, default=5.0)
+    parser.add_argument(
+        "--direct-standing-handoff",
+        action="store_true",
+        help=(
+            "continuously hold the measured Sport-standing pose during the "
+            "controller handoff instead of starting from StandDown"
+        ),
+    )
     parser.add_argument(
         "--full-power",
         action="store_true",
@@ -81,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--confirm",
         default="",
-        help='must be exactly "WOOF IS LYING DOWN AND AREA IS CLEAR"',
+        help='must be exactly "AREA IS CLEAR AND WOOF MAY MOVE"',
     )
     return parser.parse_args()
 
@@ -150,11 +171,13 @@ def _check_live_guards(
     now: float,
     start_q_isaac: Sequence[float],
     require_standdown: bool,
-    minimum_delta_rad: Sequence[float] = REDUCED_PROOF_MIN_DELTA_RAD,
-    maximum_delta_rad: Sequence[float] = REDUCED_PROOF_MAX_DELTA_RAD,
+    minimum_delta_rad: Sequence[float] = LOCKED_POINT_MIN_DELTA_RAD,
+    maximum_delta_rad: Sequence[float] = LOCKED_POINT_MAX_DELTA_RAD,
     maximum_joint_speed_rad_s: float = 1.0,
     maximum_estimated_torque: float = 20.0,
     maximum_roll_rad: float | None = 0.30,
+    tracking_slack_rad: float = COMMAND_TRACKING_SLACK_RAD,
+    observed_deviation: dict[str, float] | None = None,
 ) -> None:
     low_age_s = now - float(low["received_at"])
     if low_age_s > 0.05:
@@ -189,10 +212,17 @@ def _check_live_guards(
         )
     ):
         delta = float(value) - float(start)
-        if delta < minimum_delta - 0.08 or delta > maximum_delta + 0.08:
+        name = ISAAC_JOINT_ORDER[index]
+        if observed_deviation is not None:
+            outside = max(minimum_delta - delta, delta - maximum_delta, 0.0)
+            if outside > observed_deviation.get(name, 0.0):
+                observed_deviation[name] = outside
+        if (
+            delta < minimum_delta - tracking_slack_rad
+            or delta > maximum_delta + tracking_slack_rad
+        ):
             raise RuntimeError(
-                f"joint envelope guard: {ISAAC_JOINT_ORDER[index]} moved "
-                f"{delta:.3f} rad"
+                f"joint envelope guard: {name} moved {delta:.3f} rad"
             )
 
 
@@ -234,6 +264,89 @@ class LowCommandPublisher:
         self._publisher.Close()
 
 
+class ContinuousJointHold:
+    """Continuously publish one measured pose during a controller handoff."""
+
+    def __init__(
+        self,
+        *,
+        publisher: LowCommandPublisher,
+        target_isaac: Sequence[float],
+        kp: float,
+        kd: float,
+    ) -> None:
+        if len(target_isaac) != 12:
+            raise ValueError("continuous hold target must contain 12 joints")
+        self._publisher = publisher
+        self._lock = Lock()
+        self._target_isaac = tuple(float(value) for value in target_isaac)
+        self._kp = float(kp)
+        self._kd = float(kd)
+        self._stop = Event()
+        self._started = Event()
+        self._thread: Thread | None = None
+        self._error: BaseException | None = None
+        self.ticks = 0
+
+    def set_target(self, target_isaac: Sequence[float]) -> None:
+        if len(target_isaac) != 12:
+            raise ValueError("continuous hold target must contain 12 joints")
+        with self._lock:
+            self._target_isaac = tuple(float(value) for value in target_isaac)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("continuous joint hold is already started")
+        self._thread = Thread(
+            target=self._run,
+            name="continuous-lowcmd-hold",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._started.wait(1.0):
+            raise RuntimeError("continuous low-level publisher did not start")
+        self.raise_if_failed()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            if self._thread.is_alive():
+                raise RuntimeError("continuous low-level publisher did not stop")
+        self.raise_if_failed()
+
+    def raise_if_failed(self) -> None:
+        if self._error is not None:
+            raise RuntimeError(
+                f"continuous low-level publisher failed: {self._error}"
+            ) from self._error
+
+    def _run(self) -> None:
+        deadline = time.perf_counter()
+        period_s = 1.0 / PUBLISH_RATE_HZ
+        try:
+            while not self._stop.is_set():
+                deadline += period_s
+                with self._lock:
+                    target_isaac = self._target_isaac
+                    kp = self._kp
+                    kd = self._kd
+                self._publisher.write(
+                    isaac_to_unitree(target_isaac),
+                    kp=kp,
+                    kd=kd,
+                )
+                self.ticks += 1
+                self._started.set()
+                remaining = deadline - time.perf_counter()
+                if remaining > 0.0:
+                    time.sleep(remaining)
+        except BaseException as exc:
+            self._error = exc
+            self._started.set()
+            self._stop.set()
+
+
 def _publish_for(
     *,
     publisher: LowCommandPublisher,
@@ -244,8 +357,8 @@ def _publish_for(
     kp: float,
     kd: float,
     require_standdown: bool = False,
-    minimum_delta_rad: Sequence[float] = REDUCED_PROOF_MIN_DELTA_RAD,
-    maximum_delta_rad: Sequence[float] = REDUCED_PROOF_MAX_DELTA_RAD,
+    minimum_delta_rad: Sequence[float] = LOCKED_POINT_MIN_DELTA_RAD,
+    maximum_delta_rad: Sequence[float] = LOCKED_POINT_MAX_DELTA_RAD,
     maximum_joint_speed_rad_s: float = 1.0,
     maximum_estimated_torque: float = 20.0,
     maximum_roll_rad: float | None = 0.30,
@@ -274,31 +387,322 @@ def _publish_for(
             time.sleep(remaining)
 
 
+def ensure_standdown(sport: Any, live: LiveState, settle_s: float = 4.0) -> None:
+    """Reach and verify StandDown before Sport-mode handoff."""
+
+    low, _ = live.sample()
+    rms, maximum = standdown_error_rad(unitree_to_isaac(low["q"]))
+    if (
+        rms <= 0.08
+        and maximum <= 0.16
+        and _maximum_abs(unitree_to_isaac(low["dq"])) <= 0.20
+    ):
+        print("[standing-point] already in StandDown pose", flush=True)
+        return
+
+    print(
+        "[standing-point] commanding StandDown before low-level handoff "
+        f"(rms={rms:.3f} rad)",
+        flush=True,
+    )
+    code = sport.StandDown()
+    if code != 0:
+        raise RuntimeError(f"SportClient.StandDown() returned {code}")
+
+    deadline = time.monotonic() + settle_s
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        low, _ = live.sample()
+        rms, maximum = standdown_error_rad(unitree_to_isaac(low["q"]))
+        if (
+            rms <= 0.08
+            and maximum <= 0.16
+            and _maximum_abs(unitree_to_isaac(low["dq"])) <= 0.20
+        ):
+            print(
+                f"[standing-point] StandDown verified, rms={rms:.3f} rad",
+                flush=True,
+            )
+            return
+    raise RuntimeError(
+        f"StandDown did not settle: rms={rms:.3f}, max={maximum:.3f} rad"
+    )
+
+
+def release_sport_mode(switcher: Any, attempts: int = 12) -> None:
+    """Release Sport mode and verify that its motion service is inactive."""
+
+    for _ in range(attempts):
+        code, mode = switcher.CheckMode()
+        if code == 0 and (not mode or not mode.get("name")):
+            return
+        switcher.ReleaseMode()
+        time.sleep(0.3)
+    code, mode = switcher.CheckMode()
+    raise RuntimeError(
+        f"Sport mode still active after release: code={code}, mode={mode}"
+    )
+
+
+def _select_sport_mode(switcher: Any, attempts: int = 8) -> bool:
+    """Request ``mcf`` and verify that Sport mode is actually active."""
+
+    for _ in range(attempts):
+        check_code, mode = switcher.CheckMode()
+        if (
+            check_code == 0
+            and mode
+            and mode.get("name") == "mcf"
+        ):
+            return True
+        switcher.SelectMode("mcf")
+        time.sleep(0.25)
+    return False
+
+
+def _validate_direct_standing_start(low: dict[str, Any]) -> tuple[float, ...]:
+    """Validate a still, level Sport-standing pose for direct handoff."""
+
+    age_s = time.monotonic() - float(low["received_at"])
+    if age_s > 0.05:
+        raise RuntimeError(f"low-state is stale: {age_s:.3f}s")
+    q_isaac = unitree_to_isaac(low["q"])
+    dq_isaac = unitree_to_isaac(low["dq"])
+    violations = joint_limit_violations(q_isaac)
+    if violations:
+        raise RuntimeError(f"measured joint limit violation: {violations[0]}")
+    maximum_speed = _maximum_abs(dq_isaac)
+    if maximum_speed > 0.20:
+        raise RuntimeError(
+            "Woof is not still enough for direct handoff: "
+            f"{maximum_speed:.3f} rad/s"
+        )
+    roll, pitch, _yaw = (float(value) for value in low["rpy"])
+    if abs(roll) > 0.12 or abs(pitch) > 0.12:
+        raise RuntimeError(
+            f"Woof is not level enough: roll={roll:.3f}, pitch={pitch:.3f}"
+        )
+    standdown_rms, _standdown_max = standdown_error_rad(q_isaac)
+    if standdown_rms < 0.40:
+        raise RuntimeError("Woof is not in a standing posture")
+    errors = tuple(
+        actual - expected
+        for actual, expected in zip(
+            q_isaac,
+            ISAAC_GROUNDED_STAND_RAD,
+            strict=True,
+        )
+    )
+    standing_rms = math.sqrt(
+        sum(value * value for value in errors) / len(errors)
+    )
+    standing_max = _maximum_abs(errors)
+    if standing_rms > 0.35 or standing_max > 0.65:
+        raise RuntimeError(
+            "Sport standing posture is too far from the policy stance: "
+            f"rms={standing_rms:.3f}, max={standing_max:.3f}"
+        )
+    return q_isaac
+
+
+def _monitor_continuous_target(
+    *,
+    controller: ContinuousJointHold,
+    live: LiveState,
+    target_isaac: Sequence[float],
+    start_q_isaac: Sequence[float],
+    duration_s: float,
+    minimum_delta_rad: Sequence[float] = LOCKED_POINT_MIN_DELTA_RAD,
+    maximum_delta_rad: Sequence[float] = LOCKED_POINT_MAX_DELTA_RAD,
+    maximum_joint_speed_rad_s: float = 4.0,
+    maximum_estimated_torque: float = POLICY_TORQUE_GUARD_NM,
+    maximum_roll_rad: float | None = 0.30,
+) -> None:
+    """Set one threaded 500 Hz target while checking fresh low-state guards."""
+
+    controller.set_target(target_isaac)
+    period_s = 1.0 / PUBLISH_RATE_HZ
+    deadline = time.perf_counter()
+    ticks = max(1, int(round(duration_s * PUBLISH_RATE_HZ)))
+    for _ in range(ticks):
+        deadline += period_s
+        controller.raise_if_failed()
+        low, _sport = live.sample()
+        _check_live_guards(
+            low=low,
+            now=time.monotonic(),
+            start_q_isaac=start_q_isaac,
+            require_standdown=False,
+            minimum_delta_rad=minimum_delta_rad,
+            maximum_delta_rad=maximum_delta_rad,
+            maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+            maximum_estimated_torque=maximum_estimated_torque,
+            maximum_roll_rad=maximum_roll_rad,
+        )
+        remaining = deadline - time.perf_counter()
+        if remaining > 0.0:
+            time.sleep(remaining)
+
+
+def _lower_continuous_to_standdown(
+    *,
+    controller: ContinuousJointHold,
+    live: LiveState,
+    start_q_isaac: Sequence[float],
+    duration_s: float = 2.5,
+) -> None:
+    """Lower from a supported standing pose before closing the lowcmd writer."""
+
+    relaxed_minimum = tuple(-2.5 for _ in range(12))
+    relaxed_maximum = tuple(2.5 for _ in range(12))
+    steps = max(1, int(round(duration_s * POLICY_RATE_HZ)))
+    for step in range(1, steps + 1):
+        alpha = step / steps
+        blend = 0.5 - 0.5 * math.cos(math.pi * alpha)
+        target = tuple(
+            start + (standdown - start) * blend
+            for start, standdown in zip(
+                start_q_isaac,
+                WOOF_BUILTIN_STANDDOWN_RAD,
+                strict=True,
+            )
+        )
+        _monitor_continuous_target(
+            controller=controller,
+            live=live,
+            target_isaac=target,
+            start_q_isaac=start_q_isaac,
+            duration_s=1.0 / POLICY_RATE_HZ,
+            minimum_delta_rad=relaxed_minimum,
+            maximum_delta_rad=relaxed_maximum,
+            maximum_joint_speed_rad_s=4.0,
+            maximum_estimated_torque=POLICY_TORQUE_GUARD_NM,
+            maximum_roll_rad=0.30,
+        )
+    _monitor_continuous_target(
+        controller=controller,
+        live=live,
+        target_isaac=WOOF_BUILTIN_STANDDOWN_RAD,
+        start_q_isaac=start_q_isaac,
+        duration_s=0.5,
+        minimum_delta_rad=relaxed_minimum,
+        maximum_delta_rad=relaxed_maximum,
+        maximum_joint_speed_rad_s=4.0,
+        maximum_estimated_torque=POLICY_TORQUE_GUARD_NM,
+        maximum_roll_rad=0.30,
+    )
+
+
+def standup_from_lying(
+    *,
+    publisher: LowCommandPublisher,
+    live: LiveState,
+    duration_s: float,
+    kp: float,
+    kd: float,
+) -> tuple[float, ...]:
+    """Raise Woof smoothly into the policy's nominal standing stance."""
+
+    low, _ = live.sample()
+    start = unitree_to_isaac(low["q"])
+    steps = max(1, int(round(duration_s * POLICY_RATE_HZ)))
+    print(
+        f"[standing-point] lifting over {duration_s:.1f}s "
+        f"at kp={kp:.0f} kd={kd:.1f}",
+        flush=True,
+    )
+    for step in range(1, steps + 1):
+        alpha = step / steps
+        blend = 0.5 - 0.5 * math.cos(math.pi * alpha)
+        interpolated = tuple(
+            current + (target - current) * blend
+            for current, target in zip(
+                start,
+                ISAAC_GROUNDED_STAND_RAD,
+                strict=True,
+            )
+        )
+        _publish_for(
+            publisher=publisher,
+            live=live,
+            target_isaac=interpolated,
+            start_q_isaac=start,
+            duration_s=1.0 / POLICY_RATE_HZ,
+            kp=kp,
+            kd=kd,
+            require_standdown=False,
+            minimum_delta_rad=tuple(-2.5 for _ in range(12)),
+            maximum_delta_rad=tuple(2.5 for _ in range(12)),
+            maximum_joint_speed_rad_s=4.0,
+            maximum_estimated_torque=POLICY_TORQUE_GUARD_NM,
+            maximum_roll_rad=0.30,
+        )
+    _publish_for(
+        publisher=publisher,
+        live=live,
+        target_isaac=ISAAC_GROUNDED_STAND_RAD,
+        start_q_isaac=start,
+        duration_s=0.6,
+        kp=kp,
+        kd=kd,
+        require_standdown=False,
+        minimum_delta_rad=tuple(-2.5 for _ in range(12)),
+        maximum_delta_rad=tuple(2.5 for _ in range(12)),
+        maximum_joint_speed_rad_s=4.0,
+        maximum_estimated_torque=POLICY_TORQUE_GUARD_NM,
+        maximum_roll_rad=0.30,
+    )
+    low, _ = live.sample()
+    reached = unitree_to_isaac(low["q"])
+    worst = max(
+        abs(actual - target)
+        for actual, target in zip(
+            reached,
+            ISAAC_GROUNDED_STAND_RAD,
+            strict=True,
+        )
+    )
+    print(
+        f"[standing-point] lift complete; worst joint error={worst:.3f} rad",
+        flush=True,
+    )
+    return reached
+
+
 def main() -> int:
     args = parse_args()
     if not args.execute:
         raise RuntimeError("--execute is required; use shadow_runner.py for no-motion tests")
-    expected_confirmation = (
-        "WOOF IS LYING DOWN AND FULL POLICY AREA IS CLEAR"
-        if args.full_power
-        else "WOOF IS LYING DOWN AND AREA IS CLEAR"
-    )
+    expected_confirmation = "AREA IS CLEAR AND WOOF MAY MOVE"
     if args.confirm != expected_confirmation:
         raise RuntimeError("physical confirmation text does not match")
     if not (0.0 < args.minimum_confidence <= 1.0):
         raise ValueError("--minimum-confidence must be in (0, 1]")
-    maximum_duration_s = 3.0 if args.full_power else 2.0
+    maximum_duration_s = 8.0
     maximum_action_gain = 1.0 if args.full_power else 0.20
     maximum_target_rate = 0.60 if args.full_power else 0.25
-    maximum_kp = 25.0 if args.full_power else 10.0
-    if not (0.1 <= args.duration <= maximum_duration_s):
-        raise ValueError(f"--duration must be between 0.1 and {maximum_duration_s} seconds")
+    maximum_kp = 60.0
+    maximum_kd = 5.0
+    if not (2.0 <= args.duration <= maximum_duration_s):
+        raise ValueError(
+            f"--duration must be between 2.0 and {maximum_duration_s} seconds"
+        )
     if not (0.0 < args.action_gain <= maximum_action_gain):
         raise ValueError(f"--action-gain must be in (0, {maximum_action_gain}]")
     if not (0.05 <= args.max_rate_rad_s <= maximum_target_rate):
         raise ValueError(f"--max-rate-rad-s must be in [0.05, {maximum_target_rate}]")
-    if not (0.0 < args.kp <= maximum_kp and 0.0 < args.kd <= 1.0):
+    if not (
+        0.0 < args.kp <= maximum_kp
+        and 0.0 < args.kd <= maximum_kd
+    ):
         raise ValueError("gain guard rejected Kp/Kd")
+    if not (2.0 <= args.standup_seconds <= 5.0):
+        raise ValueError("--standup-seconds must be between 2.0 and 5.0")
+    if not (
+        0.0 < args.standup_kp <= 60.0
+        and 0.0 < args.standup_kd <= 5.0
+    ):
+        raise ValueError("stand-up gain guard rejected Kp/Kd")
     if sha256_file(args.policy) != EXPECTED_POLICY_SHA256:
         raise RuntimeError("policy SHA-256 mismatch")
 
@@ -306,9 +710,13 @@ def main() -> int:
     signal.signal(signal.SIGINT, lambda *_args: stop.set())
     signal.signal(signal.SIGTERM, lambda *_args: stop.set())
 
+    torch.set_num_threads(1)
     policy = torch.jit.load(str(args.policy), map_location="cpu").eval()
     with torch.inference_mode():
-        warm = torch.zeros((1, 49), dtype=torch.float32)
+        warm = torch.zeros(
+            (1, LOCKED_POINT_OBSERVATION_SIZE),
+            dtype=torch.float32,
+        )
         for _ in range(50):
             policy(warm)
 
@@ -325,21 +733,21 @@ def main() -> int:
     )
     boxes.start()
     publisher: LowCommandPublisher | None = None
+    controller: ContinuousJointHold | None = None
     released = False
     original_mode = "mcf"
     selected_label: str | None = None
     start_q_isaac: tuple[float, ...] | None = None
     records: list[dict[str, Any]] = []
+    droop: dict[str, float] = {}
+    peak_torque: dict[str, float] = {}
     outcome = "not_started"
     error: str | None = None
-    minimum_delta_rad = (
-        FULL_POLICY_MIN_DELTA_RAD if args.full_power else REDUCED_PROOF_MIN_DELTA_RAD
-    )
-    maximum_delta_rad = (
-        FULL_POLICY_MAX_DELTA_RAD if args.full_power else REDUCED_PROOF_MAX_DELTA_RAD
-    )
-    maximum_joint_speed_rad_s = 2.0 if args.full_power else 1.0
-    maximum_estimated_torque = 12.0 if args.full_power else 20.0
+    recovery_used_standdown = False
+    minimum_delta_rad = LOCKED_POINT_MIN_DELTA_RAD
+    maximum_delta_rad = LOCKED_POINT_MAX_DELTA_RAD
+    maximum_joint_speed_rad_s = 4.0
+    maximum_estimated_torque = POLICY_TORQUE_GUARD_NM
     maximum_bbox_age_s = 0.8
     maximum_roll_rad = 0.30
 
@@ -379,63 +787,105 @@ def main() -> int:
                 f"{box['confidence']}; need {args.minimum_confidence}"
             )
 
-        low, _sport_state = live.sample()
-        start_q_isaac = unitree_to_isaac(low["q"])
-        _check_live_guards(
-            low=low,
-            now=time.monotonic(),
-            start_q_isaac=start_q_isaac,
-            require_standdown=True,
-            minimum_delta_rad=minimum_delta_rad,
-            maximum_delta_rad=maximum_delta_rad,
-            maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
-            maximum_estimated_torque=maximum_estimated_torque,
-            maximum_roll_rad=maximum_roll_rad,
-        )
-        if _maximum_abs(unitree_to_isaac(low["dq"])) > 0.20:
-            raise RuntimeError("Woof is not still enough for handoff")
-
         mode_code, mode = switcher.CheckMode()
         if mode_code != 0 or not mode or mode.get("name") != original_mode:
             raise RuntimeError(f"unexpected controller mode: code={mode_code}, mode={mode}")
 
-        publisher = LowCommandPublisher()
-        release_code, _ = switcher.ReleaseMode()
-        if release_code != 0:
-            raise RuntimeError(f"failed to release Sport mode: {release_code}")
-        released = True
+        if args.direct_standing_handoff:
+            low, _sport_state = live.sample()
+            start_q_isaac = _validate_direct_standing_start(low)
+            publisher = LowCommandPublisher()
+            controller = ContinuousJointHold(
+                publisher=publisher,
+                target_isaac=start_q_isaac,
+                kp=args.kp,
+                kd=args.kd,
+            )
+            controller.start()
+            # Prove lowcmd frames exist before releasing the controller that is
+            # currently carrying Woof's weight.
+            time.sleep(0.10)
+            controller.raise_if_failed()
+            release_sport_mode(switcher)
+            released = True
+            _monitor_continuous_target(
+                controller=controller,
+                live=live,
+                target_isaac=start_q_isaac,
+                start_q_isaac=start_q_isaac,
+                duration_s=0.25,
+                maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+                maximum_estimated_torque=maximum_estimated_torque,
+                maximum_roll_rad=maximum_roll_rad,
+            )
+            print(
+                "[standing-point] direct Sport-standing handoff verified",
+                flush=True,
+            )
+        else:
+            ensure_standdown(sport, live)
+            low, _sport_state = live.sample()
+            start_q_isaac = unitree_to_isaac(low["q"])
+            _check_live_guards(
+                low=low,
+                now=time.monotonic(),
+                start_q_isaac=start_q_isaac,
+                require_standdown=True,
+                minimum_delta_rad=minimum_delta_rad,
+                maximum_delta_rad=maximum_delta_rad,
+                maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+                maximum_estimated_torque=maximum_estimated_torque,
+                maximum_roll_rad=maximum_roll_rad,
+            )
+            if _maximum_abs(unitree_to_isaac(low["dq"])) > 0.20:
+                raise RuntimeError("Woof is not still enough for handoff")
 
-        # Immediately take over at the measured pose with intentionally low
-        # gains, then prove the low-state stream remains healthy.
-        _publish_for(
-            publisher=publisher,
-            live=live,
-            target_isaac=start_q_isaac,
-            start_q_isaac=start_q_isaac,
-            duration_s=0.25,
-            kp=args.kp,
-            kd=args.kd,
-            require_standdown=True,
-            minimum_delta_rad=minimum_delta_rad,
-            maximum_delta_rad=maximum_delta_rad,
-            maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
-            maximum_estimated_torque=maximum_estimated_torque,
-            maximum_roll_rad=maximum_roll_rad,
-        )
+            publisher = LowCommandPublisher()
+            release_sport_mode(switcher)
+            released = True
+
+            # Immediately take over at the measured pose with intentionally low
+            # gains, then prove the low-state stream remains healthy.
+            _publish_for(
+                publisher=publisher,
+                live=live,
+                target_isaac=start_q_isaac,
+                start_q_isaac=start_q_isaac,
+                duration_s=0.25,
+                kp=args.kp,
+                kd=args.kd,
+                require_standdown=True,
+                minimum_delta_rad=minimum_delta_rad,
+                maximum_delta_rad=maximum_delta_rad,
+                maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+                maximum_estimated_torque=maximum_estimated_torque,
+                maximum_roll_rad=maximum_roll_rad,
+            )
+
+            start_q_isaac = standup_from_lying(
+                publisher=publisher,
+                live=live,
+                duration_s=args.standup_seconds,
+                kp=args.standup_kp,
+                kd=args.standup_kd,
+            )
 
         period_s = 1.0 / PUBLISH_RATE_HZ
         policy_stride = int(round(PUBLISH_RATE_HZ / POLICY_RATE_HZ))
         total_ticks = int(round(args.duration * PUBLISH_RATE_HZ))
         next_deadline = time.perf_counter()
         command_q = tuple(start_q_isaac)
-        previous_action = (0.0,) * 12
+        previous_action = (0.0,) * LOCKED_POINT_ACTION_SIZE
         lock_id = box.get("lock_id")
-        latest_action = (0.0,) * 12
+        latest_action = (0.0,) * LOCKED_POINT_ACTION_SIZE
+        policy_started = time.monotonic()
 
         with torch.inference_mode():
             for tick in range(total_ticks):
                 if stop.is_set():
                     raise RuntimeError("operator stop requested")
+                if controller is not None:
+                    controller.raise_if_failed()
                 next_deadline += period_s
                 low, _sport_state = live.sample()
                 now = time.monotonic()
@@ -449,7 +899,15 @@ def main() -> int:
                     maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
                     maximum_estimated_torque=maximum_estimated_torque,
                     maximum_roll_rad=maximum_roll_rad,
+                    observed_deviation=droop,
                 )
+                for name, torque in zip(
+                    ISAAC_JOINT_ORDER,
+                    unitree_to_isaac(low["tau_est"]),
+                    strict=True,
+                ):
+                    if abs(torque) > peak_torque.get(name, 0.0):
+                        peak_torque[name] = abs(torque)
 
                 if tick % policy_stride == 0:
                     box = boxes.sample()
@@ -473,27 +931,36 @@ def main() -> int:
                         )
                     q_isaac = unitree_to_isaac(low["q"])
                     dq_isaac = unitree_to_isaac(low["dq"])
-                    observation = build_actor_observation(
-                        # SportModeState stops updating after handoff.  Woof is
-                        # grounded and guarded stationary, so this first proof
-                        # explicitly uses zero body linear velocity.
+                    phase = locked_point_phase(
+                        time.monotonic() - policy_started,
+                        LOCKED_POINT_SETUP_S,
+                        LOCKED_POINT_RAMP_S,
+                    )
+                    observation = build_locked_point_observation(
+                        # SportModeState stops updating after handoff. The
+                        # standing point is stationary, so body linear velocity
+                        # is explicitly zero.
                         base_linear_velocity_body=(0.0, 0.0, 0.0),
                         base_angular_velocity_body=low["gyroscope"],
                         gravity_body=projected_gravity_wxyz(low["quaternion"]),
                         joint_position_isaac=q_isaac,
                         joint_velocity_isaac=dq_isaac,
                         previous_action=previous_action,
+                        point_phase=phase,
                         bbox_xyxy_normalized=box["bbox"],
                     )
                     output = policy(
                         torch.tensor(observation, dtype=torch.float32).unsqueeze(0)
                     ).squeeze(0)
                     latest_action = tuple(float(value) for value in output)
-                    if len(latest_action) != 12 or not all(
+                    if len(latest_action) != LOCKED_POINT_ACTION_SIZE or not all(
                         math.isfinite(value) for value in latest_action
                     ):
                         raise RuntimeError("actor returned invalid action")
-                    raw_target = actor_action_to_joint_target(latest_action)
+                    raw_target = locked_point_joint_targets(
+                        latest_action,
+                        point_phase=phase,
+                    )
                     command_q = guarded_policy_target(
                         raw_target=raw_target,
                         start_target=start_q_isaac,
@@ -504,32 +971,44 @@ def main() -> int:
                         maximum_delta_rad=maximum_delta_rad,
                     )
                     previous_action = tuple(
-                        (command - default) / 0.5
-                        for command, default in zip(
-                            command_q, ISAAC_GROUNDED_SIT_RAD, strict=True
+                        (
+                            command_q[ISAAC_JOINT_ORDER.index(name)]
+                            - ISAAC_GROUNDED_STAND_RAD[
+                                ISAAC_JOINT_ORDER.index(name)
+                            ]
                         )
+                        / 0.5
+                        for name in ISAAC_JOINT_ORDER
+                        if not name.startswith("FR_")
                     )
                     records.append(
                         {
                             "policy_tick": tick // policy_stride,
+                            "point_phase": phase,
                             "bbox": box["bbox"],
                             "confidence": box["confidence"],
                             "bbox_age_s": bbox_age_s,
                             "bbox_held": bool(box.get("held")),
+                            "bbox_source": box.get("source"),
                             "action": latest_action,
                             "command_q_isaac": command_q,
                             "measured_q_isaac": q_isaac,
                             "rpy": low["rpy"],
                             "max_joint_speed_rad_s": _maximum_abs(dq_isaac),
-                            "max_estimated_torque": _maximum_abs(low["tau_est"]),
+                            "max_estimated_torque": _maximum_abs(
+                                low["tau_est"]
+                            ),
                         }
                     )
 
-                publisher.write(
-                    isaac_to_unitree(command_q),
-                    kp=args.kp,
-                    kd=args.kd,
-                )
+                if controller is None:
+                    publisher.write(
+                        isaac_to_unitree(command_q),
+                        kp=args.kp,
+                        kd=args.kd,
+                    )
+                else:
+                    controller.set_target(command_q)
                 remaining = next_deadline - time.perf_counter()
                 if remaining > 0.0:
                     time.sleep(remaining)
@@ -577,12 +1056,44 @@ def main() -> int:
                             return_command, start_q_isaac, strict=True
                         )
                     )
+                    if controller is None:
+                        _publish_for(
+                            publisher=publisher,
+                            live=live,
+                            target_isaac=return_command,
+                            start_q_isaac=start_q_isaac,
+                            duration_s=return_period,
+                            kp=args.kp,
+                            kd=args.kd,
+                            minimum_delta_rad=minimum_delta_rad,
+                            maximum_delta_rad=maximum_delta_rad,
+                            maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+                            maximum_estimated_torque=maximum_estimated_torque,
+                            maximum_roll_rad=maximum_roll_rad,
+                        )
+                    else:
+                        _monitor_continuous_target(
+                            controller=controller,
+                            live=live,
+                            target_isaac=return_command,
+                            start_q_isaac=start_q_isaac,
+                            duration_s=return_period,
+                            minimum_delta_rad=minimum_delta_rad,
+                            maximum_delta_rad=maximum_delta_rad,
+                            maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+                            maximum_estimated_torque=maximum_estimated_torque,
+                            maximum_roll_rad=maximum_roll_rad,
+                        )
+                    remaining = return_deadline - time.perf_counter()
+                    if remaining > 0.0:
+                        time.sleep(remaining)
+                if controller is None:
                     _publish_for(
                         publisher=publisher,
                         live=live,
-                        target_isaac=return_command,
+                        target_isaac=start_q_isaac,
                         start_q_isaac=start_q_isaac,
-                        duration_s=return_period,
+                        duration_s=0.20,
                         kp=args.kp,
                         kd=args.kd,
                         minimum_delta_rad=minimum_delta_rad,
@@ -591,59 +1102,97 @@ def main() -> int:
                         maximum_estimated_torque=maximum_estimated_torque,
                         maximum_roll_rad=maximum_roll_rad,
                     )
-                    remaining = return_deadline - time.perf_counter()
-                    if remaining > 0.0:
-                        time.sleep(remaining)
-                _publish_for(
-                    publisher=publisher,
-                    live=live,
-                    target_isaac=start_q_isaac,
-                    start_q_isaac=start_q_isaac,
-                    duration_s=0.20,
-                    kp=args.kp,
-                    kd=args.kd,
-                    minimum_delta_rad=minimum_delta_rad,
-                    maximum_delta_rad=maximum_delta_rad,
-                    maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
-                    maximum_estimated_torque=maximum_estimated_torque,
-                    maximum_roll_rad=maximum_roll_rad,
-                )
+                else:
+                    _monitor_continuous_target(
+                        controller=controller,
+                        live=live,
+                        target_isaac=start_q_isaac,
+                        start_q_isaac=start_q_isaac,
+                        duration_s=0.20,
+                        minimum_delta_rad=minimum_delta_rad,
+                        maximum_delta_rad=maximum_delta_rad,
+                        maximum_joint_speed_rad_s=maximum_joint_speed_rad_s,
+                        maximum_estimated_torque=maximum_estimated_torque,
+                        maximum_roll_rad=maximum_roll_rad,
+                    )
             except Exception as return_exc:
                 error = f"{error or ''}; return guard: {return_exc}".strip("; ")
                 outcome = "aborted_during_return"
-            try:
-                publisher.close()
-            except Exception:
-                pass
-            try:
-                select_code = -1
-                restored_mode: dict[str, Any] | None = None
-                for _ in range(8):
-                    check_code, restored_mode = switcher.CheckMode()
-                    if (
-                        check_code == 0
-                        and restored_mode
-                        and restored_mode.get("name") == original_mode
-                    ):
-                        select_code = 0
-                        break
-                    select_code, _ = switcher.SelectMode(original_mode)
-                    if select_code == 0:
-                        time.sleep(0.5)
-                        continue
-                    # Unitree code 7002 is transient while the just-closed
-                    # lowcmd writer is still disappearing from DDS discovery.
-                    time.sleep(0.5)
-                check_code, restored_mode = switcher.CheckMode()
-                if not (
-                    select_code == 0
-                    and check_code == 0
-                    and restored_mode
-                    and restored_mode.get("name") == original_mode
-                ):
-                    error = f"{error or ''}; failed to restore mcf: {select_code}".strip("; ")
+            if controller is not None:
+                try:
+                    # Some firmware accepts mcf while the lowcmd writer is
+                    # still holding the measured standing pose.  Woof's tested
+                    # build does not, so the fallback lowers under continuous
+                    # control before closing the writer.
+                    restored = _select_sport_mode(switcher, attempts=3)
+                    if not restored:
+                        recovery_used_standdown = True
+                        low, _sport_state = live.sample()
+                        _lower_continuous_to_standdown(
+                            controller=controller,
+                            live=live,
+                            start_q_isaac=unitree_to_isaac(low["q"]),
+                        )
+                    controller.stop()
+                    controller = None
+                    publisher.close()
+                    publisher = None
+                    if not restored:
+                        restored = _select_sport_mode(switcher)
+                    if not restored:
+                        raise RuntimeError("failed to restore mcf")
+                    released = False
+                    if recovery_used_standdown:
+                        standdown_code = sport.StandDown()
+                        if standdown_code != 0:
+                            raise RuntimeError(
+                                "StandDown after controller restore failed: "
+                                f"{standdown_code}"
+                            )
+                        time.sleep(0.75)
+                        standup_code = sport.StandUp()
+                        if standup_code != 0:
+                            raise RuntimeError(
+                                f"StandUp after controller restore failed: {standup_code}"
+                            )
+                        posture_deadline = time.monotonic() + 5.0
+                        while True:
+                            low, _sport_state = live.sample()
+                            try:
+                                _validate_direct_standing_start(low)
+                                break
+                            except RuntimeError:
+                                if time.monotonic() >= posture_deadline:
+                                    raise RuntimeError(
+                                        "Sport standing pose did not settle "
+                                        "after controller restoration"
+                                    )
+                                time.sleep(0.05)
+                except Exception as restore_exc:
+                    error = (
+                        f"{error or ''}; restore exception: {restore_exc}"
+                    ).strip("; ")
                     outcome = "restore_failed"
-                else:
+                    if controller is not None:
+                        try:
+                            controller.stop()
+                        except Exception:
+                            pass
+                        controller = None
+                    if publisher is not None:
+                        try:
+                            publisher.close()
+                        except Exception:
+                            pass
+                        publisher = None
+                    if _select_sport_mode(switcher):
+                        released = False
+            else:
+                try:
+                    publisher.close()
+                    publisher = None
+                    if not _select_sport_mode(switcher):
+                        raise RuntimeError("failed to restore mcf")
                     released = False
                     time.sleep(0.4)
                     standdown_code = sport.StandDown()
@@ -673,20 +1222,69 @@ def main() -> int:
                                 "StandDown did not reach the verified pose after mcf restore"
                             )
                         time.sleep(0.05)
-            except Exception as restore_exc:
-                error = f"{error or ''}; restore exception: {restore_exc}".strip("; ")
-                outcome = "restore_failed"
+                except Exception as restore_exc:
+                    error = (
+                        f"{error or ''}; restore exception: {restore_exc}"
+                    ).strip("; ")
+                    outcome = "restore_failed"
+        if controller is not None:
+            try:
+                controller.stop()
+            except Exception:
+                pass
+        if publisher is not None:
+            try:
+                publisher.close()
+            except Exception:
+                pass
         boxes.close()
 
     final_low, _final_sport = live.sample()
     final_q_isaac = unitree_to_isaac(final_low["q"])
     final_rms, final_max = standdown_error_rad(final_q_isaac)
+    final_standing_errors = tuple(
+        actual - expected
+        for actual, expected in zip(
+            final_q_isaac,
+            ISAAC_GROUNDED_STAND_RAD,
+            strict=True,
+        )
+    )
+    final_standing_rms = math.sqrt(
+        sum(value * value for value in final_standing_errors)
+        / len(final_standing_errors)
+    )
+    final_standing_max = _maximum_abs(final_standing_errors)
     report = {
         "outcome": outcome,
         "error": error,
         "policy_sha256": EXPECTED_POLICY_SHA256,
         "selected_label": selected_label,
         "policy_ticks": len(records),
+        "policy_kind": "locked_point_v19",
+        "handoff_mode": (
+            "sport_standing_direct"
+            if args.direct_standing_handoff
+            else "standdown_then_lift"
+        ),
+        "recovery_used_standdown": recovery_used_standdown,
+        "observation_size": LOCKED_POINT_OBSERVATION_SIZE,
+        "action_size": LOCKED_POINT_ACTION_SIZE,
+        "tracking_slack_rad": COMMAND_TRACKING_SLACK_RAD,
+        "peak_estimated_torque_nm": {
+            name: round(value, 2)
+            for name, value in sorted(
+                peak_torque.items(),
+                key=lambda item: -item[1],
+            )
+        },
+        "worst_droop_outside_envelope_rad": {
+            name: round(value, 4)
+            for name, value in sorted(
+                droop.items(),
+                key=lambda item: -item[1],
+            )
+        },
         "requested_duration_s": args.duration,
         "action_gain": args.action_gain,
         "max_rate_rad_s": args.max_rate_rad_s,
@@ -701,6 +1299,8 @@ def main() -> int:
         "final_lowstate_age_s": time.monotonic() - float(final_low["received_at"]),
         "final_standdown_rms_error_rad": final_rms,
         "final_standdown_max_error_rad": final_max,
+        "final_standing_rms_error_rad": final_standing_rms,
+        "final_standing_max_error_rad": final_standing_max,
         "records": records,
     }
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

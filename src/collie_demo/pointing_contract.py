@@ -10,6 +10,12 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Sequence
 
+from .standing_pose import (
+    BALANCE_ACTUATED_JOINTS as LOCKED_POINT_ACTION_JOINTS,
+    LOCKED_POINT_FR_JOINTS_RAD,
+    NOMINAL_STAND_JOINT_POSITIONS_RAD,
+)
+
 
 ISAAC_JOINT_ORDER = (
     "FL_hip_joint",
@@ -60,6 +66,10 @@ ISAAC_GROUNDED_SIT_RAD = (
     -0.3932350988,
     1.2788276997,
     -2.70,
+)
+
+ISAAC_GROUNDED_STAND_RAD = tuple(
+    NOMINAL_STAND_JOINT_POSITIONS_RAD[name] for name in ISAAC_JOINT_ORDER
 )
 
 WOOF_BUILTIN_STANDDOWN_RAD = (
@@ -166,6 +176,42 @@ FULL_POLICY_MAX_DELTA_RAD = (
     0.90,
 )
 
+# locked_point_v19 is a 47 -> 9 balance actor.  It controls only the support
+# joints; the front-right leg follows the deterministic training schedule.
+LOCKED_POINT_OBSERVATION_SIZE = 47
+LOCKED_POINT_ACTION_SIZE = 9
+LOCKED_POINT_ACTION_SCALE = 0.5
+
+LOCKED_POINT_MIN_DELTA_RAD = (
+    -0.555781,
+    -0.900361,
+    -0.15,
+    -0.25,
+    -1.996916,
+    -0.25,
+    -0.15,
+    -0.793657,
+    -0.15,
+    -0.15,
+    -0.464542,
+    -0.15,
+)
+
+LOCKED_POINT_MAX_DELTA_RAD = (
+    0.15,
+    0.15,
+    0.662239,
+    0.25,
+    0.25,
+    0.65224,
+    0.262717,
+    0.15,
+    0.662239,
+    0.257894,
+    0.15,
+    0.662239,
+)
+
 
 def unitree_to_isaac(values: Sequence[float]) -> tuple[float, ...]:
     """Remap the first twelve Unitree motor values into Isaac actor order."""
@@ -270,6 +316,91 @@ def actor_action_to_joint_target(action: Sequence[float]) -> tuple[float, ...]:
     )
 
 
+def build_locked_point_observation(
+    *,
+    base_linear_velocity_body: Sequence[float],
+    base_angular_velocity_body: Sequence[float],
+    gravity_body: Sequence[float],
+    joint_position_isaac: Sequence[float],
+    joint_velocity_isaac: Sequence[float],
+    previous_action: Sequence[float],
+    point_phase: float,
+    bbox_xyxy_normalized: Sequence[float],
+) -> tuple[float, ...]:
+    """Build the exact 47-value observation used by locked_point_v19."""
+
+    groups = (
+        ("base_linear_velocity_body", base_linear_velocity_body, 3),
+        ("base_angular_velocity_body", base_angular_velocity_body, 3),
+        ("gravity_body", gravity_body, 3),
+        ("joint_position_isaac", joint_position_isaac, 12),
+        ("joint_velocity_isaac", joint_velocity_isaac, 12),
+        ("previous_action", previous_action, LOCKED_POINT_ACTION_SIZE),
+        ("bbox_xyxy_normalized", bbox_xyxy_normalized, 4),
+    )
+    for name, values, expected in groups:
+        if len(values) != expected:
+            raise ValueError(
+                f"{name} must contain {expected} values, got {len(values)}"
+            )
+
+    joint_position_relative = tuple(
+        float(position) - default
+        for position, default in zip(
+            joint_position_isaac,
+            ISAAC_GROUNDED_STAND_RAD,
+            strict=True,
+        )
+    )
+    observation = (
+        *(float(value) for value in base_linear_velocity_body),
+        *(float(value) for value in base_angular_velocity_body),
+        *(float(value) for value in gravity_body),
+        *joint_position_relative,
+        *(float(value) for value in joint_velocity_isaac),
+        *(float(value) for value in previous_action),
+        float(point_phase),
+        *(float(value) for value in bbox_xyxy_normalized),
+    )
+    if len(observation) != LOCKED_POINT_OBSERVATION_SIZE:
+        raise AssertionError(
+            f"actor observation has {len(observation)} values"
+        )
+    if not all(math.isfinite(value) for value in observation):
+        raise ValueError("actor observation contains non-finite values")
+    return observation
+
+
+def locked_point_joint_targets(
+    action: Sequence[float],
+    *,
+    point_phase: float,
+) -> tuple[float, ...]:
+    """Map nine support actions plus the fixed front-right schedule to joints."""
+
+    if len(action) != LOCKED_POINT_ACTION_SIZE:
+        raise ValueError(
+            f"action must contain {LOCKED_POINT_ACTION_SIZE} values, "
+            f"got {len(action)}"
+        )
+    if not all(math.isfinite(float(value)) for value in action):
+        raise ValueError("action contains non-finite values")
+    phase = min(1.0, max(0.0, float(point_phase)))
+    commanded = dict(zip(LOCKED_POINT_ACTION_JOINTS, action, strict=True))
+    targets = []
+    for name in ISAAC_JOINT_ORDER:
+        stance = NOMINAL_STAND_JOINT_POSITIONS_RAD[name]
+        if name in LOCKED_POINT_FR_JOINTS_RAD:
+            locked = LOCKED_POINT_FR_JOINTS_RAD[name]
+            targets.append(stance + phase * (locked - stance))
+        else:
+            targets.append(
+                stance
+                + LOCKED_POINT_ACTION_SCALE * float(commanded[name])
+            )
+    return tuple(targets)
+
+
 def guarded_policy_target(
     *,
     raw_target: Sequence[float],
@@ -337,8 +468,10 @@ def selected_target_bbox_from_status(
 ) -> dict[str, Any]:
     """Return the normalized box for Collie's explicitly selected target.
 
-    The pointing policy must follow the user's target lock.  It must never
-    silently substitute the highest-confidence detection from another class.
+    The pointing policy must follow the user's target lock.  When the mission
+    explicitly uses ``same_class`` matching, a stale image tracker may be
+    reacquired from a fresh detector result of that same selected class.  It
+    must never substitute another class or use a stale detector frame.
     """
 
     width = int(status.get("frame_width") or 0)
@@ -346,35 +479,126 @@ def selected_target_bbox_from_status(
     label = status.get("selected_target_name")
     target = status.get("selected_target")
     age_s = status.get("selected_target_age_s")
-    if not label or not isinstance(target, Mapping):
+    lock_id = status.get("target_lock_id")
+    if not label or lock_id is None:
         raise ValueError("Collie has no selected target")
     if width <= 0 or height <= 0:
         raise ValueError("Collie status has invalid frame dimensions")
-    if age_s is None or not math.isfinite(float(age_s)) or float(age_s) > maximum_age_s:
-        raise ValueError(f"selected target is stale: age={age_s!r}")
+    target_is_fresh = bool(
+        isinstance(target, Mapping)
+        and age_s is not None
+        and math.isfinite(float(age_s))
+        and float(age_s) <= maximum_age_s
+    )
+    if target_is_fresh:
+        values = target.get("bbox_xywh")
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise ValueError("selected target has no bbox_xywh")
+        if len(values) != 4:
+            raise ValueError("selected target bbox_xywh must contain four values")
+        x, y, box_width, box_height = (float(value) for value in values)
+        if box_width <= 0.0 or box_height <= 0.0:
+            raise ValueError("selected target box must have positive size")
+        x1, y1, x2, y2 = (
+            x,
+            y,
+            x + box_width,
+            y + box_height,
+        )
+        confidence = float(target.get("confidence") or 0.0)
+        frame_age_s = float(age_s)
+        source = "selected_tracker"
+    else:
+        mission = status.get("mission")
+        produce = status.get("produce")
+        if (
+            not isinstance(mission, Mapping)
+            or mission.get("target_policy") != "same_class"
+            or not isinstance(produce, Mapping)
+        ):
+            raise ValueError(f"selected target is stale: age={age_s!r}")
+        produce_age_s = produce.get("age_s")
+        if (
+            produce_age_s is None
+            or not math.isfinite(float(produce_age_s))
+            or float(produce_age_s) > maximum_age_s
+        ):
+            raise ValueError(
+                "selected target and same-class detector are stale: "
+                f"target_age={age_s!r}, detector_age={produce_age_s!r}"
+            )
+        thresholds = produce.get("class_thresholds")
+        class_threshold = (
+            float(thresholds.get(str(label), 0.0))
+            if isinstance(thresholds, Mapping)
+            else float(produce.get("confidence_threshold") or 0.0)
+        )
+        detections = produce.get("detections")
+        candidates = [
+            detection
+            for detection in (
+                detections
+                if isinstance(detections, Sequence)
+                and not isinstance(detections, (str, bytes))
+                else ()
+            )
+            if isinstance(detection, Mapping)
+            and detection.get("label") == label
+            and float(detection.get("confidence") or 0.0) >= class_threshold
+        ]
+        if not candidates:
+            raise ValueError(
+                f"selected {label} tracker is stale and no fresh same-class detection exists"
+            )
+        previous_center: tuple[float, float] | None = None
+        if isinstance(target, Mapping):
+            center = target.get("center")
+            if (
+                isinstance(center, Sequence)
+                and not isinstance(center, (str, bytes))
+                and len(center) == 2
+            ):
+                previous_center = (float(center[0]), float(center[1]))
 
-    values = target.get("bbox_xywh")
-    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
-        raise ValueError("selected target has no bbox_xywh")
-    if len(values) != 4:
-        raise ValueError("selected target bbox_xywh must contain four values")
-    x, y, box_width, box_height = (float(value) for value in values)
-    if box_width <= 0.0 or box_height <= 0.0:
-        raise ValueError("selected target box must have positive size")
+        def candidate_key(candidate: Mapping[str, Any]) -> tuple[float, float]:
+            confidence = float(candidate.get("confidence") or 0.0)
+            center = candidate.get("center")
+            if (
+                previous_center is None
+                or not isinstance(center, Sequence)
+                or isinstance(center, (str, bytes))
+                or len(center) != 2
+            ):
+                return (0.0, -confidence)
+            dx = float(center[0]) - previous_center[0]
+            dy = float(center[1]) - previous_center[1]
+            return (dx * dx + dy * dy, -confidence)
 
-    x1 = max(0.0, min(1.0, x / width))
-    y1 = max(0.0, min(1.0, y / height))
-    x2 = max(0.0, min(1.0, (x + box_width) / width))
-    y2 = max(0.0, min(1.0, (y + box_height) / height))
+        reacquired = min(candidates, key=candidate_key)
+        values = reacquired.get("bbox_xyxy")
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise ValueError("same-class detection has no bbox_xyxy")
+        if len(values) != 4:
+            raise ValueError("same-class bbox_xyxy must contain four values")
+        x1, y1, x2, y2 = (float(value) for value in values)
+        confidence = float(reacquired.get("confidence") or 0.0)
+        frame_age_s = float(produce_age_s)
+        source = "same_class_reacquired"
+
+    x1 = max(0.0, min(1.0, x1 / width))
+    y1 = max(0.0, min(1.0, y1 / height))
+    x2 = max(0.0, min(1.0, x2 / width))
+    y2 = max(0.0, min(1.0, y2 / height))
     if x1 >= x2 or y1 >= y2:
         raise ValueError("selected target box is outside the camera frame")
 
     return {
         "bbox": (x1, y1, x2, y2),
         "label": str(label),
-        "confidence": float(target.get("confidence") or 0.0),
-        "frame_age_s": float(age_s),
-        "lock_id": status.get("target_lock_id"),
+        "confidence": confidence,
+        "frame_age_s": frame_age_s,
+        "lock_id": lock_id,
+        "source": source,
     }
 
 

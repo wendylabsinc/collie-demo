@@ -114,7 +114,10 @@ def test_committed_command_stays_busy_until_monitor_finishes(monkeypatch) -> Non
     monkeypatch.setattr(main, "last_command_at", 0.0)
     monkeypatch.setattr(main, "BARK_DURATION_S", 0.0)
     monkeypatch.setattr(main, "_require_stage_preflight", lambda: None)
-    monkeypatch.setattr(main, "_play_bark", lambda: None)
+    pre_mission_barks: list[bool] = []
+    monkeypatch.setattr(
+        main, "_play_bark", lambda: pre_mission_barks.append(True)
+    )
     monkeypatch.setattr(main, "_announce_on_stage_background", lambda *args: None)
     monkeypatch.setattr(main, "_report_event", lambda *args, **kwargs: None)
     submitted: list[str] = []
@@ -139,6 +142,7 @@ def test_committed_command_stays_busy_until_monitor_finishes(monkeypatch) -> Non
     assert state.snapshot()["mission_busy"] is True
     assert state.snapshot()["last_event"] == "guarded_mission_active"
     assert submitted == ["pear"]
+    assert pre_mission_barks == []
     assert started_threads == [("round-3", "pear")]
 
     main._handle_committed_transcript("banana")

@@ -39,20 +39,44 @@ class MissionConfig:
     arrival_rest_enabled: bool = False
     arrival_rest_duration_s: float = 5.0
     arrival_pointing_enabled: bool = False
-    arrival_pointing_label: str = "pear"
+    arrival_pointing_label: str = "all"
     arrival_pointing_timeout_s: float = 20.0
     return_home_enabled: bool = False
+    return_backend: str = "local_odometry"
+    nav2_poll_period_s: float = 0.10
     return_arrival_tolerance_m: float = 0.25
     return_heading_tolerance_rad: float = math.radians(10.0)
     return_heading_gate_rad: float = math.radians(30.0)
     return_forward_mps: float = 0.20
     return_yaw_gain: float = 1.2
+    return_turn_minimum_yaw_rps: float = 0.35
+    return_turn_response_timeout_s: float = 0.75
+    return_turn_response_min_progress_rad: float = math.radians(2.0)
+    return_turn_recovery_settle_s: float = 1.0
     return_timeout_s: float = 20.0
     return_stall_timeout_s: float = 3.0
     return_stall_min_progress_m: float = 0.06
+    return_clearance_backoff_m: float = 0.25
+    return_clearance_reverse_mps: float = 0.10
+    return_clearance_timeout_s: float = 4.0
+    return_clearance_stall_timeout_s: float = 1.25
+    return_clearance_min_progress_m: float = 0.01
+    return_clearance_home_behind_rad: float = math.radians(120.0)
+    return_pose_capture_duration_s: float = 0.40
+    return_pose_capture_max_drift_m: float = 0.04
+    return_pose_capture_max_yaw_drift_rad: float = math.radians(4.0)
+    return_pose_settle_duration_s: float = 0.50
+    return_pose_settle_timeout_s: float = 3.0
+    return_pose_settle_max_drift_m: float = 0.01
+    return_pose_settle_max_yaw_drift_rad: float = math.radians(2.0)
+    return_max_distance_m: float = 3.0
+    return_max_odometry_step_m: float = 0.15
+    return_max_odometry_yaw_step_rad: float = math.radians(30.0)
     capture_timeout_s: float = 2.0
     match_confirmations_required: int = 3
     approach_misses_allowed: int = 2
+    approach_reacquire_attempts: int = 3
+    approach_reacquire_timeout_s: float = 10.0
     turn_angle_rad: float = math.pi
     turn_rate_rps: float = 0.30
     turn_tolerance_rad: float = math.radians(7.0)
@@ -80,6 +104,8 @@ class MissionConfig:
             raise ValueError("match_confirmations_required must be positive")
         if self.approach_misses_allowed < 1:
             raise ValueError("approach_misses_allowed must be positive")
+        if self.approach_reacquire_attempts < 1:
+            raise ValueError("approach_reacquire_attempts must be positive")
         if self.near_confirmations_required < 1:
             raise ValueError("near_confirmations_required must be positive")
         for name in (
@@ -101,14 +127,36 @@ class MissionConfig:
             "search_sweep_rad",
             "search_timeout_s",
             "match_reacquire_timeout_s",
+            "approach_reacquire_timeout_s",
+            "nav2_poll_period_s",
             "return_arrival_tolerance_m",
             "return_heading_tolerance_rad",
             "return_heading_gate_rad",
             "return_forward_mps",
             "return_yaw_gain",
+            "return_turn_minimum_yaw_rps",
+            "return_turn_response_timeout_s",
+            "return_turn_response_min_progress_rad",
+            "return_turn_recovery_settle_s",
             "return_timeout_s",
             "return_stall_timeout_s",
             "return_stall_min_progress_m",
+            "return_clearance_backoff_m",
+            "return_clearance_reverse_mps",
+            "return_clearance_timeout_s",
+            "return_clearance_stall_timeout_s",
+            "return_clearance_min_progress_m",
+            "return_clearance_home_behind_rad",
+            "return_pose_capture_duration_s",
+            "return_pose_capture_max_drift_m",
+            "return_pose_capture_max_yaw_drift_rad",
+            "return_pose_settle_duration_s",
+            "return_pose_settle_timeout_s",
+            "return_pose_settle_max_drift_m",
+            "return_pose_settle_max_yaw_drift_rad",
+            "return_max_distance_m",
+            "return_max_odometry_step_m",
+            "return_max_odometry_yaw_step_rad",
             "near_loss_grace_s",
             "final_approach_distance_m",
             "final_approach_mps",
@@ -138,12 +186,17 @@ class MissionConfig:
         if self.final_approach_distance_m > 0.30:
             raise ValueError("final_approach_distance_m cannot exceed 0.30 m")
         if self.arrival_pointing_label.strip().lower() not in {
+            "all",
             "apple",
             "banana",
             "pear",
         }:
             raise ValueError(
-                "arrival_pointing_label must be apple, banana, or pear"
+                "arrival_pointing_label must be all, apple, banana, or pear"
+            )
+        if self.return_backend not in {"local_odometry", "nav2"}:
+            raise ValueError(
+                "return_backend must be local_odometry or nav2"
             )
 
 
@@ -160,6 +213,8 @@ class MissionTelemetry:
     near_target_recent: bool = False
     near_target_confirmations: int = 0
     near_target_bbox_height_ratio: float | None = None
+    approach_pause_count: int = 0
+    approach_pause_status: str = "not_requested"
     final_approach_status: str = "not_requested"
     final_approach_elapsed_s: float = 0.0
     final_approach_commanded_distance_m: float = 0.0
@@ -177,11 +232,18 @@ class MissionTelemetry:
     arrival_pointing_target: str | None = None
     contact_status: str = "not_requested"
     search_progress_rad: float = 0.0
-    home_pose: dict[str, float] | None = None
+    home_pose: dict[str, float | str] | None = None
+    home_pose_validation: dict[str, float | int | str] | None = None
+    return_backend: str = "local_odometry"
+    nav2_status: dict[str, object] | None = None
     return_home_status: str = "not_requested"
     return_distance_m: float | None = None
     return_heading_error_rad: float | None = None
     return_progress_m: float = 0.0
+    return_clearance_status: str = "not_requested"
+    return_clearance_progress_m: float = 0.0
+    return_turn_status: str = "not_requested"
+    return_turn_recovery_count: int = 0
 
     def to_dict(self, now: float) -> dict[str, object]:
         return {
@@ -200,6 +262,8 @@ class MissionTelemetry:
             "near_target_bbox_height_ratio": None
             if self.near_target_bbox_height_ratio is None
             else round(self.near_target_bbox_height_ratio, 3),
+            "approach_pause_count": self.approach_pause_count,
+            "approach_pause_status": self.approach_pause_status,
             "final_approach_status": self.final_approach_status,
             "final_approach_elapsed_s": round(self.final_approach_elapsed_s, 3),
             "final_approach_commanded_distance_m": round(
@@ -222,6 +286,9 @@ class MissionTelemetry:
             "contact_status": self.contact_status,
             "search_progress_deg": round(math.degrees(self.search_progress_rad), 1),
             "home_pose": self.home_pose,
+            "home_pose_validation": self.home_pose_validation,
+            "return_backend": self.return_backend,
+            "nav2_status": self.nav2_status,
             "return_home_status": self.return_home_status,
             "return_distance_m": None
             if self.return_distance_m is None
@@ -230,4 +297,10 @@ class MissionTelemetry:
             if self.return_heading_error_rad is None
             else round(math.degrees(self.return_heading_error_rad), 1),
             "return_progress_m": round(self.return_progress_m, 3),
+            "return_clearance_status": self.return_clearance_status,
+            "return_clearance_progress_m": round(
+                self.return_clearance_progress_m, 3
+            ),
+            "return_turn_status": self.return_turn_status,
+            "return_turn_recovery_count": self.return_turn_recovery_count,
         }

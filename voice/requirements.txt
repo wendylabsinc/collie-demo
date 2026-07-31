@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30,<1
 websocket-client>=1.8,<2
 unitree_webrtc_connect==2.1.2
 av>=14,<17
+opencv-python-headless>=4.8,<5
