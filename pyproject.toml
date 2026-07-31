@@ -25,6 +25,7 @@ collie-demo = "collie_demo.main:main"
 collie-demo-supervised = "collie_demo.supervisor:main"
 collie-fruit-webcam = "collie_demo.fruit_webcam:main"
 collie-fruit-ui = "collie_demo.fruit_server:main"
+collie-pointing-policy = "collie_demo.pointing_runner:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

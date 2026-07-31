@@ -4,4 +4,8 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 captures/
-models/
+models/*
+!models/pointing/
+models/pointing/*
+!models/pointing/policy_actor_42500.jit
+!models/pointing/locked_point_actor.jit

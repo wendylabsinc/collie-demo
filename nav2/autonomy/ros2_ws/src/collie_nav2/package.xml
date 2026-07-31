@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>collie_nav2</name>
+  <version>0.1.0</version>
+  <description>Map-frame Nav2 return-to-home gateway for collie-demo.</description>
+  <maintainer email="robotics@wendy.sh">Wendy Labs</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

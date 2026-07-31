@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+import inspect
 import json
 import logging
 import os
@@ -17,14 +18,21 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import cv2
 from fastapi import FastAPI, HTTPException, WebSocket as FastAPIWebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import uvicorn
 import websocket
 
-from commands import parse_voice_command
+try:
+    from .camera_broker import CameraBrokerState, register_camera_routes
+    from .commands import parse_voice_command
+except ImportError:  # Docker runs this file directly from /app.
+    from camera_broker import CameraBrokerState, register_camera_routes
+    from commands import parse_voice_command
 
 
 GO2_IP = os.environ.get("GO2_IP", "192.168.123.161")
@@ -52,8 +60,19 @@ SCRIBE_CHUNK_BYTES = (
 )
 COMMAND_DEBOUNCE_S = 4.0
 BARK_DURATION_S = 0.65
+MISSION_POLL_S = float(os.environ.get("COLLIE_VOICE_MISSION_POLL_S", "0.10"))
+MISSION_TIMEOUT_S = float(
+    os.environ.get("COLLIE_VOICE_MISSION_TIMEOUT_S", "120")
+)
 STAGE_AUDIO_URL = os.environ.get("COLLIE_STAGE_AUDIO_URL", "").rstrip("/")
 STAGE_MIC_FRESH_S = 0.75
+CAMERA_FRESHNESS_LIMIT_S = 0.75
+CAMERA_FIRST_PLI_S = 0.5
+CAMERA_PLI_INTERVAL_S = 1.0
+CAMERA_FIRST_FRAME_TIMEOUT_S = 5.0
+CAMERA_MIDSTREAM_PLI_S = 0.4
+CAMERA_WATCHDOG_PERIOD_S = 0.05
+CAMERA_JPEG_QUALITY = int(os.environ.get("COLLIE_CAMERA_JPEG_QUALITY", "85"))
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -61,6 +80,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("collie-voice")
 logging.getLogger("aiortc.codecs.h264").setLevel(logging.ERROR)
+
+
+class TypedCommandRequest(BaseModel):
+    command: str
 
 
 class _DropFrameSpam(logging.Filter):
@@ -99,6 +122,8 @@ class VoiceState:
             "last_event": "starting",
             "last_error": "",
             "mission_busy": False,
+            "arrival_bark_status": "not_requested",
+            "arrival_bark_error": "",
             "bark_ready": bool(BARK_UUID),
             "stage_speaker_connected": False,
             "stage_speaker_error": "",
@@ -135,6 +160,36 @@ class VoiceState:
             current = int(self._values["stage_mic_clients"])
             self._values["stage_mic_clients"] = max(0, current + delta)
 
+    def try_begin_mission(self, target: str) -> bool:
+        with self._lock:
+            if bool(self._values["mission_busy"]):
+                return False
+            self._values.update(
+                {
+                    "mission_busy": True,
+                    "last_target": target,
+                    "last_event": "validating_mission_preflight",
+                    "last_error": "",
+                    "arrival_bark_status": "pending",
+                    "arrival_bark_error": "",
+                }
+            )
+            return True
+
+    def finish_mission(self, *, event: str, error: str = "") -> None:
+        with self._lock:
+            self._values.update(
+                {
+                    "mission_busy": False,
+                    "last_event": event,
+                    "last_error": error[-500:],
+                }
+            )
+
+    def mission_busy(self) -> bool:
+        with self._lock:
+            return bool(self._values["mission_busy"])
+
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             result = dict(self._values)
@@ -166,11 +221,15 @@ class VoiceState:
         )
         result["model"] = SCRIBE_MODEL
         result["allowed_targets"] = ["apple", "banana", "pear"]
-        result["command_pattern"] = "Find the apple, banana, or pear"
+        result["command_pattern"] = "Say apple, banana, or pear"
+        result["camera"] = camera_state.status()
         return result
 
 
 state = VoiceState()
+camera_state = CameraBrokerState(
+    freshness_limit_s=CAMERA_FRESHNESS_LIMIT_S
+)
 mic_chunks: queue.Queue[bytes] = queue.Queue(maxsize=256)
 shutdown_event = threading.Event()
 listen_event = threading.Event()
@@ -183,6 +242,7 @@ active_scribe_ws: Any = None
 active_scribe_ws_lock = threading.Lock()
 last_command_key = ""
 last_command_at = 0.0
+mission_monitor_thread: threading.Thread | None = None
 
 
 def _enqueue_pcm(pcm: bytes, source: str) -> None:
@@ -376,11 +436,113 @@ def _stage_audio_supervisor() -> None:
         shutdown_event.wait(2.0)
 
 
-def _handle_committed_transcript(transcript: str) -> None:
-    global last_command_at, last_command_key
+def _monitor_guarded_mission(round_id: str, target: str) -> None:
+    """Keep voice input gated until the robot is home or safely aborted."""
+
+    deadline = time.monotonic() + MISSION_TIMEOUT_S
+    arrival_barked = False
+    last_status_error = ""
+    while not shutdown_event.is_set() and time.monotonic() < deadline:
+        try:
+            status = _collie_status()
+            last_status_error = ""
+        except Exception as exc:
+            last_status_error = str(exc)
+            state.update(
+                last_event="voice_mission_status_reconnecting",
+                last_error=last_status_error[-500:],
+            )
+            shutdown_event.wait(MISSION_POLL_S)
+            continue
+
+        current_round_id = str(status.get("round_id") or "")
+        if round_id and current_round_id and current_round_id != round_id:
+            state.finish_mission(
+                event="voice_mission_superseded",
+                error="the active Collie round changed",
+            )
+            return
+
+        mission = dict(status.get("mission") or {})
+        phase = str(mission.get("phase") or "")
+        rest_status = str(mission.get("arrival_rest_status") or "")
+        return_status = str(mission.get("return_home_status") or "")
+
+        if rest_status == "holding" and not arrival_barked:
+            arrival_barked = True
+            state.update(
+                last_event="barking_while_resting_at_target",
+                arrival_bark_status="playing",
+                arrival_bark_error="",
+            )
+            try:
+                _play_bark()
+            except Exception as exc:
+                state.update(
+                    arrival_bark_status="failed",
+                    arrival_bark_error=str(exc)[-500:],
+                )
+                _report_event(
+                    "arrival_bark_failed",
+                    target=target,
+                    error=str(exc),
+                )
+                log.warning("Arrival bark failed without aborting mission: %s", exc)
+            else:
+                state.update(
+                    arrival_bark_status="complete",
+                    arrival_bark_error="",
+                )
+                _report_event("arrival_bark_played", target=target)
+
+        mission_active = bool(mission.get("active"))
+        if (
+            phase == "success"
+            and return_status == "complete"
+            and not mission_active
+        ):
+            _announce_on_stage_background("mission_complete", target)
+            state.finish_mission(event="voice_mission_complete_ready")
+            _report_event("voice_mission_complete_ready", target=target)
+            return
+        if phase == "aborted":
+            reason = str(mission.get("reason") or "voice mission aborted")
+            _announce_on_stage_background("mission_aborted", target)
+            state.finish_mission(
+                event="voice_mission_aborted_ready",
+                error=reason,
+            )
+            _report_event(
+                "voice_mission_aborted_ready",
+                target=target,
+                error=reason,
+            )
+            return
+
+        shutdown_event.wait(MISSION_POLL_S)
+
+    if shutdown_event.is_set():
+        return
+    try:
+        _collie_post("/api/stop", {})
+    except Exception as exc:
+        last_status_error = str(exc)
+    error = "voice mission monitor timed out"
+    if last_status_error:
+        error = f"{error}: {last_status_error}"
+    state.finish_mission(event="voice_mission_monitor_timeout", error=error)
+    _report_event(
+        "voice_mission_monitor_timeout",
+        target=target,
+        error=error,
+    )
+
+
+def _handle_committed_transcript(transcript: str) -> str:
+    global last_command_at, last_command_key, mission_monitor_thread
     cleaned = " ".join(transcript.strip().split())
     if not cleaned:
-        return
+        return "speech_ignored_empty"
     state.update(
         last_heard=cleaned,
         last_partial="",
@@ -390,13 +552,13 @@ def _handle_committed_transcript(transcript: str) -> None:
     if command is None:
         state.update(last_event="speech_ignored_not_a_command")
         _report_event("speech_ignored_not_a_command", transcript=cleaned)
-        return
+        return "speech_ignored_not_a_command"
 
     command_key = f"{command.kind}:{command.target or ''}"
     now = time.monotonic()
     if command_key == last_command_key and now - last_command_at < COMMAND_DEBOUNCE_S:
         state.update(last_event="duplicate_command_ignored")
-        return
+        return "duplicate_command_ignored"
     last_command_key = command_key
     last_command_at = now
 
@@ -405,32 +567,29 @@ def _handle_committed_transcript(transcript: str) -> None:
             _collie_post("/api/stop", {})
             state.update(last_event="voice_stop_applied", last_error="")
             _report_event("voice_stop_applied", transcript=cleaned)
+            return "voice_stop_applied"
         except Exception as exc:
             state.update(last_event="voice_stop_failed", last_error=str(exc))
             _report_event(
                 "voice_stop_failed", transcript=cleaned, error=str(exc)
             )
-        return
+            return "voice_stop_failed"
 
     if not command_lock.acquire(blocking=False):
         state.update(last_event="command_ignored_mission_busy")
-        return
+        return "command_ignored_mission_busy"
     target = command.target
     assert target is not None
-    state.update(
-        mission_busy=True,
-        last_target=target,
-        last_event="barking_before_mission",
-        last_error="",
-    )
+    if not state.try_begin_mission(target):
+        command_lock.release()
+        state.update(last_event="command_ignored_mission_busy")
+        return "command_ignored_mission_busy"
     _report_event("voice_command_accepted", transcript=cleaned, target=target)
     try:
         _require_stage_preflight()
-        _play_bark()
         _announce_on_stage_background("command_heard", target)
-        time.sleep(BARK_DURATION_S)
         state.update(last_event="submitting_guarded_mission")
-        _collie_post(
+        mission_status = _collie_post(
             "/api/voice/mission",
             {
                 "target": target,
@@ -438,20 +597,29 @@ def _handle_committed_transcript(transcript: str) -> None:
                 "confirmation": "VOICE COMMAND HEARD",
             },
         )
-        state.update(last_event="guarded_mission_started", last_error="")
+        round_id = str(mission_status.get("round_id") or "")
+        state.update(last_event="guarded_mission_active", last_error="")
         _report_event(
             "guarded_mission_started", transcript=cleaned, target=target
         )
+        mission_monitor_thread = threading.Thread(
+            target=_monitor_guarded_mission,
+            args=(round_id, target),
+            daemon=True,
+            name=f"mission-monitor-{target}",
+        )
+        mission_monitor_thread.start()
+        return "guarded_mission_active"
     except Exception as exc:
-        state.update(last_event="voice_mission_failed", last_error=str(exc))
+        state.finish_mission(event="voice_mission_failed", error=str(exc))
         _report_event(
             "voice_mission_failed",
             transcript=cleaned,
             target=target,
             error=str(exc),
         )
+        return "voice_mission_failed"
     finally:
-        state.update(mission_busy=False)
         command_lock.release()
 
 
@@ -636,6 +804,117 @@ async def _on_mic_frame(frame: Any) -> None:
         state.update(last_error=f"microphone decode failed: {exc}")
 
 
+def _encode_video_frame(frame: Any) -> tuple[bytes, int, int]:
+    image = frame.to_ndarray(format="bgr24")
+    height, width = int(image.shape[0]), int(image.shape[1])
+    encoded_ok, encoded = cv2.imencode(
+        ".jpg",
+        image,
+        [cv2.IMWRITE_JPEG_QUALITY, CAMERA_JPEG_QUALITY],
+    )
+    if not encoded_ok:
+        raise RuntimeError("could not encode decoded WebRTC camera frame")
+    return encoded.tobytes(), width, height
+
+
+async def _on_video_track(track: Any, generation: str) -> None:
+    first_frame = True
+    while not shutdown_event.is_set():
+        try:
+            frame = await track.recv()
+            jpeg, width, height = await asyncio.to_thread(
+                _encode_video_frame,
+                frame,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = f"video track ended: {type(exc).__name__}: {exc}"
+            camera_state.note_track_error(generation, error)
+            log.warning(error)
+            return
+        packet = camera_state.publish(
+            generation,
+            jpeg,
+            width=width,
+            height=height,
+        )
+        if packet is None:
+            return
+        if first_frame:
+            first_frame = False
+            log.info(
+                "First decoded video frame generation=%s size=%dx%d",
+                generation,
+                width,
+                height,
+            )
+
+
+async def _request_video_pli(connection: Any) -> bool:
+    requested = False
+    for transceiver in connection.pc.getTransceivers():
+        receiver = getattr(transceiver, "receiver", None)
+        track = None if receiver is None else getattr(receiver, "track", None)
+        if track is None or getattr(track, "kind", None) != "video":
+            continue
+        send_pli = getattr(receiver, "_send_rtcp_pli", None)
+        ssrc = getattr(receiver, "_ssrc", None) or getattr(
+            receiver,
+            "_track_id",
+            None,
+        )
+        if not callable(send_pli) or ssrc is None:
+            continue
+        outcome = send_pli(ssrc)
+        if inspect.isawaitable(outcome):
+            await outcome
+        requested = True
+    if requested:
+        log.info("Requested Go2 H.264 keyframe (PLI)")
+    else:
+        log.warning("Could not find a Go2 video receiver for PLI")
+    return requested
+
+
+class _CameraSessionFailure(RuntimeError):
+    def __init__(self, message: str, *, stale: bool = False) -> None:
+        super().__init__(message)
+        self.stale = bool(stale)
+
+
+def _camera_watchdog_action(
+    *,
+    connected_elapsed_s: float,
+    frame_age_s: float | None,
+    pli_elapsed_s: float | None,
+) -> str:
+    """Return the bounded PLI/reconnect action for current media freshness."""
+
+    if frame_age_s is None:
+        if connected_elapsed_s >= CAMERA_FIRST_FRAME_TIMEOUT_S:
+            return "reconnect"
+        if connected_elapsed_s >= CAMERA_FIRST_PLI_S and (
+            pli_elapsed_s is None
+            or pli_elapsed_s >= CAMERA_PLI_INTERVAL_S
+        ):
+            return "pli"
+        return "wait"
+    if frame_age_s >= CAMERA_FRESHNESS_LIMIT_S:
+        return "reconnect"
+    if frame_age_s >= CAMERA_MIDSTREAM_PLI_S and pli_elapsed_s is None:
+        return "pli"
+    return "wait"
+
+
+def _next_webrtc_attempt(attempt: int, fresh_duration_s: float) -> int:
+    return 1 if fresh_duration_s >= 10.0 else max(0, int(attempt)) + 1
+
+
+def _webrtc_backoff_s(attempt: int) -> float:
+    return min(10.0, 0.75 * (2 ** max(0, int(attempt) - 1)))
+
+
 async def _webrtc_once() -> None:
     global audiohub_ref, webrtc_loop_ref
     from unitree_webrtc_connect import (
@@ -644,32 +923,109 @@ async def _webrtc_once() -> None:
     )
     from unitree_webrtc_connect.webrtc_audiohub import WebRTCAudioHub
 
+    generation = camera_state.begin_session()
     webrtc_loop_ref = asyncio.get_running_loop()
     connection = UnitreeWebRTCConnection(
         WebRTCConnectionMethod.LocalSTA, ip=GO2_IP
     )
-    await connection.connect()
-    # The peer connection can be healthy while the robot's microphone
-    # channel remains disabled. Unitree's audio examples explicitly enable
-    # this channel before registering the receive callback.
-    connection.audio.switchAudioChannel(True)
-    connection.audio.add_track_callback(_on_mic_frame)
-    audiohub_ref = WebRTCAudioHub(connection)
-    state.update(
-        webrtc_connected=True,
-        last_event="go2_microphone_connected",
-        last_error="",
-    )
-    _report_event("go2_microphone_connected")
+    disconnect_error = "WebRTC session ended"
+    stale_disconnect = False
     try:
+        await connection.connect()
+        connection.video.add_track_callback(
+            lambda track: _on_video_track(track, generation)
+        )
+        connection.video.switchVideoChannel(True)
+        # The peer connection can be healthy while the robot's microphone
+        # channel remains disabled. Register before switching the channel so
+        # the first emitted sample cannot race callback installation.
+        connection.audio.add_track_callback(_on_mic_frame)
+        connection.audio.switchAudioChannel(True)
+        audiohub_ref = WebRTCAudioHub(connection)
+        camera_state.set_connected(generation, video_enabled=True)
+        state.update(
+            webrtc_connected=True,
+            last_event="go2_microphone_camera_connected",
+            last_error="",
+        )
+        _report_event("go2_microphone_camera_connected")
+        connected_at = time.monotonic()
+        observed_frame_id: int | None = None
+        last_pli_at: float | None = None
         while not shutdown_event.is_set():
             peer_state = str(getattr(connection.pc, "connectionState", "connected"))
+            camera_state.set_peer_state(generation, peer_state)
             if peer_state in {"failed", "closed", "disconnected"}:
-                raise RuntimeError(f"Go2 WebRTC state is {peer_state}")
-            await asyncio.sleep(0.5)
+                raise _CameraSessionFailure(
+                    f"Go2 WebRTC state is {peer_state}"
+                )
+            track_error = camera_state.terminal_track_error(generation)
+            if track_error:
+                raise _CameraSessionFailure(track_error)
+            now = time.monotonic()
+            frame_id, last_frame_at = camera_state.frame_marker(generation)
+            frame_age_s = (
+                None
+                if frame_id is None or last_frame_at is None
+                else max(0.0, now - last_frame_at)
+            )
+            action = _camera_watchdog_action(
+                connected_elapsed_s=max(0.0, now - connected_at),
+                frame_age_s=frame_age_s,
+                pli_elapsed_s=(
+                    None
+                    if last_pli_at is None
+                    else max(0.0, now - last_pli_at)
+                ),
+            )
+            if frame_age_s is None:
+                if action == "reconnect":
+                    raise _CameraSessionFailure(
+                        "no first decoded WebRTC video frame within 5 seconds",
+                        stale=True,
+                    )
+                if action == "pli":
+                    try:
+                        await _request_video_pli(connection)
+                    except Exception as exc:
+                        log.warning("Initial video PLI failed: %s", exc)
+                    last_pli_at = now
+            else:
+                if frame_id != observed_frame_id:
+                    observed_frame_id = frame_id
+                    last_pli_at = None
+                    action = _camera_watchdog_action(
+                        connected_elapsed_s=max(0.0, now - connected_at),
+                        frame_age_s=frame_age_s,
+                        pli_elapsed_s=None,
+                    )
+                if action == "reconnect":
+                    raise _CameraSessionFailure(
+                        f"decoded WebRTC video stalled for {frame_age_s:.3f}s",
+                        stale=True,
+                    )
+                if action == "pli":
+                    try:
+                        await _request_video_pli(connection)
+                    except Exception as exc:
+                        log.warning("Midstream video PLI failed: %s", exc)
+                    last_pli_at = now
+            await asyncio.sleep(CAMERA_WATCHDOG_PERIOD_S)
+    except _CameraSessionFailure as exc:
+        disconnect_error = str(exc)
+        stale_disconnect = exc.stale
+        raise
+    except Exception as exc:
+        disconnect_error = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
         state.update(webrtc_connected=False)
         audiohub_ref = None
+        camera_state.disconnect(
+            generation,
+            disconnect_error if not shutdown_event.is_set() else "shutdown",
+            stale=stale_disconnect,
+        )
         try:
             await connection.disconnect()
         except Exception:
@@ -681,17 +1037,19 @@ def _webrtc_supervisor() -> None:
     while not shutdown_event.is_set():
         try:
             asyncio.run(_webrtc_once())
-            attempt = 0
         except Exception as exc:
-            attempt += 1
-            delay = min(10.0, 0.75 * (2 ** min(attempt - 1, 4)))
+            attempt = _next_webrtc_attempt(
+                attempt,
+                camera_state.last_session_fresh_duration_s(),
+            )
+            delay = _webrtc_backoff_s(attempt)
             state.update(
                 webrtc_connected=False,
-                last_event="go2_microphone_reconnecting",
+                last_event="go2_webrtc_reconnecting",
                 last_error=str(exc)[-500:],
             )
             _report_event(
-                "go2_microphone_reconnecting", error=str(exc)[-500:]
+                "go2_webrtc_reconnecting", error=str(exc)[-500:]
             )
             shutdown_event.wait(delay)
 
@@ -745,11 +1103,36 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+register_camera_routes(app, camera_state)
 
 
 @app.get("/api/status")
 def api_status() -> dict[str, object]:
     return state.snapshot()
+
+
+@app.post("/api/command")
+def typed_command(request: TypedCommandRequest) -> dict[str, object]:
+    """Run a typed fruit label through the same guarded path as speech."""
+
+    command = parse_voice_command(request.command)
+    if command is None or command.kind != "find":
+        raise HTTPException(
+            status_code=422,
+            detail="Type apple, banana, or pear.",
+        )
+    outcome = _handle_committed_transcript(request.command)
+    snapshot = state.snapshot()
+    if outcome != "guarded_mission_active":
+        detail = {
+            "duplicate_command_ignored": "That command was just submitted.",
+            "command_ignored_mission_busy": "A fruit mission is already active.",
+            "voice_mission_failed": str(
+                snapshot.get("last_error") or "The guarded mission could not start."
+            ),
+        }.get(outcome, "The typed fruit command was not accepted.")
+        raise HTTPException(status_code=409, detail=detail)
+    return snapshot
 
 
 @app.websocket("/api/audio/ws")

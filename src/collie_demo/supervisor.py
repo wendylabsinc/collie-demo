@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Mapping
 import urllib.error
 import urllib.request
 
@@ -61,9 +62,48 @@ def emergency_brake() -> None:
         raise RuntimeError(f"StopMove returned {result!r}")
 
 
+def pointing_warmup_command(
+    environ: Mapping[str, str] | None = None,
+) -> list[str] | None:
+    """Build a CPU-only policy warm-up command when pointing is enabled."""
+
+    values = os.environ if environ is None else environ
+    enabled = values.get("COLLIE_POINTING_ENABLED", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+    policy_path = values.get("COLLIE_POINTING_POLICY", "").strip()
+    if not policy_path:
+        raise RuntimeError(
+            "COLLIE_POINTING_POLICY is required when pointing is enabled"
+        )
+    script = (
+        "import sys, torch; "
+        "from collie_demo.pointing_contract import LOCKED_POINT_OBSERVATION_SIZE; "
+        "model=torch.jit.load(sys.argv[1], map_location='cpu').eval(); "
+        "sample=torch.zeros((1, LOCKED_POINT_OBSERVATION_SIZE), dtype=torch.float32); "
+        "model(sample); "
+        "print('collie supervisor: pointing policy warm-up complete', flush=True)"
+    )
+    return [sys.executable, "-c", script, policy_path]
+
+
+def warm_pointing_policy() -> None:
+    """Populate the child-process page cache before the API becomes ready."""
+
+    command = pointing_warmup_command()
+    if command is None:
+        return
+    subprocess.run(
+        command,
+        check=True,
+        timeout=float(os.environ.get("COLLIE_POINTING_WARMUP_TIMEOUT_S", "120")),
+    )
+
+
 def main() -> None:
     port = int(os.environ.get("COLLIE_PORT", "8096"))
     url = f"http://127.0.0.1:{port}/api/status"
+    warm_pointing_policy()
     child = subprocess.Popen([sys.executable, "-m", "collie_demo.main"])
     terminating = False
 

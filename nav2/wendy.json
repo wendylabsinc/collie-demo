@@ -1,0 +1,51 @@
+{
+  "appId": "collie-nav2",
+  "version": "0.1.0",
+  "platform": "linux/arm64",
+  "services": {
+    "bridge": {
+      "context": "./bridge",
+      "env": {
+        "LIDAR_SOURCE_TOPIC": "/hesai/points",
+        "RAW_SCAN_TOPIC": "/collie/raw_scan",
+        "SCAN_OUTPUT_TOPIC": "/scan",
+        "COLLIE_LIDAR_FRAME": "hesai_lidar",
+        "COLLIE_LIDAR_X": "0.247072",
+        "COLLIE_LIDAR_Y": "-0.052732",
+        "COLLIE_LIDAR_Z": "0.104320",
+        "COLLIE_LIDAR_ROLL": "-0.006257",
+        "COLLIE_LIDAR_PITCH": "0.013145",
+        "COLLIE_LIDAR_YAW": "1.573435",
+        "ODOM_OUTPUT_MAX_HZ": "50"
+      },
+      "entitlements": [
+        {"type": "network", "mode": "host"}
+      ]
+    },
+    "autonomy": {
+      "context": "./autonomy",
+      "dependsOn": ["bridge"],
+      "env": {
+        "COLLIE_LIDAR_FRAME": "hesai_lidar",
+        "COLLIE_LIDAR_X": "0.247072",
+        "COLLIE_LIDAR_Y": "-0.052732",
+        "COLLIE_LIDAR_Z": "0.104320",
+        "COLLIE_LIDAR_ROLL": "-0.006257",
+        "COLLIE_LIDAR_PITCH": "0.013145",
+        "COLLIE_LIDAR_YAW": "1.573435",
+        "COLLIE_LIDAR_TRANSFORM_VALIDATED": "1"
+      },
+      "frameworks": {
+        "ros2": {
+          "distro": "jazzy",
+          "domainId": 30,
+          "rmw": "cyclonedds"
+        }
+      },
+      "entitlements": [
+        {"type": "network", "mode": "host"},
+        {"type": "persist", "name": "collie-nav2-maps", "path": "/maps"}
+      ]
+    }
+  }
+}

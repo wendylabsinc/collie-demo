@@ -1,9 +1,11 @@
 """Exclusive, watchdog-protected Unitree motion boundary.
 
-Adapted from go2-follow-clean. Translational commands only use Unitree's
-factory ObstaclesAvoidClient. A separately armed, yaw-only lease may use
-SportClient.Move for an in-place turn; that mode cannot accept translation and
-shares the same watchdog and independent StopMove brake.
+Adapted from go2-follow-clean. Fruit approach commands use Unitree's factory
+ObstaclesAvoidClient. Separately armed SportClient leases support either
+yaw-only turns or Nav2-planned forward/yaw commands. The Nav2 lease is only
+selected by the map-navigation runtime, remains forward-only, and shares the
+same watchdog, velocity bounds, exclusive ownership, and independent StopMove
+brake.
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ class LeaseMismatch(MotionError):
 class SportClientProtocol(Protocol):
     def SetTimeout(self, timeout_s: float) -> Any: ...
     def Init(self) -> Any: ...
+    def StandUp(self) -> int: ...
     def BalanceStand(self) -> int: ...
+    def StandDown(self) -> int: ...
     def Hello(self) -> int: ...
     def Stretch(self) -> int: ...
     def Move(self, vx: float, vy: float, vyaw: float) -> int: ...
@@ -53,6 +57,7 @@ class AvoidanceClientProtocol(Protocol):
 @dataclass(frozen=True, slots=True)
 class MotionConfig:
     maximum_forward_mps: float = 0.08
+    maximum_reverse_mps: float = 0.10
     maximum_yaw_rps: float = 0.25
     command_watchdog_s: float = 0.35
     rpc_timeout_s: float = 0.75
@@ -64,6 +69,13 @@ class MotionConfig:
     client_timeout_s: float = 12.0
     avoidance_verify_interval_s: float = 0.30
     remote_api_settle_s: float = 0.0
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.maximum_reverse_mps)
+            or self.maximum_reverse_mps <= 0.0
+        ):
+            raise ValueError("maximum_reverse_mps must be positive")
 
 
 class UnitreeMotionAdapter:
@@ -96,7 +108,7 @@ class UnitreeMotionAdapter:
             return False
         if self._mode == "avoidance":
             return self._avoidance_enabled and self._remote_api_enabled
-        return self._mode == "direct_yaw"
+        return self._mode in {"direct_yaw", "direct_navigation"}
 
     def status(self) -> dict[str, object]:
         return {
@@ -104,12 +116,16 @@ class UnitreeMotionAdapter:
             "armed": self.armed,
             "mode": self._mode,
             "fault": self._fault,
-            "avoidance_required": True,
+            "avoidance_required": self._mode != "direct_navigation",
+            "external_collision_planner_required": (
+                self._mode == "direct_navigation"
+            ),
             "avoidance_enabled": self._avoidance_enabled,
             "remote_api_enabled": self._remote_api_enabled,
             "watchdog_s": self.config.command_watchdog_s,
             "limits": {
                 "forward_mps": self.config.maximum_forward_mps,
+                "reverse_mps": self.config.maximum_reverse_mps,
                 "yaw_rps": self.config.maximum_yaw_rps,
                 "lateral_mps": 0.0,
             },
@@ -184,6 +200,40 @@ class UnitreeMotionAdapter:
             self._last_command = VelocityCommand(reason="direct_yaw_armed_zero")
             return self._lease
 
+    async def arm_direct_navigation(self) -> str:
+        """Acquire a forward/yaw Sport lease reserved for healthy Nav2.
+
+        Factory avoidance and Nav2 must not independently steer the same
+        command. This lease disables the factory avoidance command channel;
+        the caller is therefore required to enforce a fresh local costmap,
+        map localization, command heartbeat, and independent STOP.
+        """
+
+        async with self._lock:
+            self._require_ready()
+            if self._lease is not None:
+                raise MotionNotReady("motion lease already active")
+            try:
+                await self._success(
+                    self.avoidance.UseRemoteCommandFromApi, False
+                )
+                await self._success(self.avoidance.SwitchSet, False)
+                await self._idle_stop()
+            except Exception as exc:
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(
+                    f"direct navigation arm failed: {exc}"
+                ) from exc
+            self._avoidance_enabled = False
+            self._remote_api_enabled = False
+            self._last_verify_at = None
+            self._lease = secrets.token_urlsafe(32)
+            self._mode = "direct_navigation"
+            self._last_command = VelocityCommand(
+                reason="direct_navigation_armed_zero"
+            )
+            return self._lease
+
     async def perform_hello(self) -> None:
         """Run the stock paw-forward gesture while locomotion is disarmed."""
 
@@ -210,6 +260,91 @@ class UnitreeMotionAdapter:
             self._remote_api_enabled = False
             self._last_verify_at = None
             self._last_command = VelocityCommand(reason="hello_gesture_complete")
+
+    async def perform_standdown(self, *, settle_s: float = 1.0) -> None:
+        """Put Woof in the measured low StandDown pose with no motion lease."""
+
+        settle_s = float(settle_s)
+        if not math.isfinite(settle_s) or settle_s < 0.0:
+            raise ValueError("StandDown settle time must be finite and non-negative")
+        async with self._lock:
+            self._require_ready()
+            if self._lease is not None:
+                raise MotionNotReady("motion lease already active")
+            self._cancel_watchdog()
+            try:
+                await self._success(self.avoidance.UseRemoteCommandFromApi, False)
+                await self._success(self.avoidance.SwitchSet, False)
+                await self._idle_stop()
+                await self._success(
+                    self.sport.StandDown,
+                    timeout_s=self.config.skill_timeout_s,
+                )
+                # The RPC can return before LowState shows the completed
+                # posture. The runner independently verifies pose/stillness;
+                # this pause prevents an eager stage click from racing it.
+                if settle_s:
+                    await asyncio.sleep(settle_s)
+            except Exception as exc:
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(f"StandDown failed: {exc}") from exc
+            self._avoidance_enabled = False
+            self._remote_api_enabled = False
+            self._last_verify_at = None
+            self._last_command = VelocityCommand(
+                reason="pointing_standdown_complete"
+            )
+
+    async def perform_stand_up(self, *, settle_s: float = 1.0) -> None:
+        """Rise from StandDown and re-enter locomotion-ready balance mode."""
+
+        settle_s = float(settle_s)
+        if not math.isfinite(settle_s) or settle_s < 0.0:
+            raise ValueError(
+                "StandUp settle time must be finite and non-negative"
+            )
+        async with self._lock:
+            self._require_ready()
+            if self._lease is not None:
+                raise MotionNotReady("motion lease already active")
+            self._cancel_watchdog()
+            try:
+                await self._success(self.avoidance.UseRemoteCommandFromApi, False)
+                await self._success(self.avoidance.SwitchSet, False)
+                await self._idle_stop()
+                await self._success(
+                    self.sport.StandUp,
+                    timeout_s=self.config.skill_timeout_s,
+                )
+                if settle_s:
+                    await asyncio.sleep(settle_s)
+                # StandUp raises Woof from the low rest posture, but on the
+                # real Go2 it does not necessarily leave SportClient.Move in
+                # an active locomotion mode. Pair it with BalanceStand before
+                # handing the robot back to navigation. Calling only
+                # BalanceStand is insufficient when Woof is still lying down.
+                await self._success(
+                    self.sport.BalanceStand,
+                    timeout_s=self.config.skill_timeout_s,
+                )
+                if settle_s:
+                    await asyncio.sleep(settle_s)
+            except Exception as exc:
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(
+                    f"StandUp/BalanceStand recovery failed: {exc}"
+                ) from exc
+            self._avoidance_enabled = False
+            self._remote_api_enabled = False
+            self._last_verify_at = None
+            self._last_command = VelocityCommand(
+                reason="pointing_stand_up_complete"
+            )
+
+    async def perform_balance_stand(self, *, settle_s: float = 1.0) -> None:
+        """Compatibility alias for the complete locomotion recovery."""
+
+        await self.perform_stand_up(settle_s=settle_s)
 
     async def perform_stretch(self, *, settle_s: float = 0.0) -> None:
         """Run the stock stretch once while locomotion remains disarmed."""
@@ -268,6 +403,43 @@ class UnitreeMotionAdapter:
                 self._cancel_watchdog()
             return self._last_command
 
+    async def send_reverse_clearance(
+        self,
+        lease: str,
+        reverse_mps: float,
+        reason: str = "return_clearance",
+    ) -> VelocityCommand:
+        """Back away under avoidance for the private return-home controller.
+
+        General navigation remains forward-only. This separate method keeps
+        reverse unavailable to browser/API callers while preserving the same
+        owner checks, obstacle-avoidance verification, and stale-command
+        watchdog used by normal navigation.
+        """
+
+        speed = float(reverse_mps)
+        if not math.isfinite(speed) or speed < 0.0:
+            raise ValueError("reverse speed must be finite and non-negative")
+        speed = min(speed, self.config.maximum_reverse_mps)
+        forward = -speed
+        async with self._lock:
+            self._require_owner(lease, required_mode="avoidance")
+            self._cancel_watchdog()
+            try:
+                if speed != 0.0:
+                    await self._verify_avoidance_if_due()
+                await self._success(self.avoidance.Move, forward, 0.0, 0.0)
+            except Exception as exc:
+                self._fault = f"reverse clearance command failed: {exc}"
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(self._fault) from exc
+            self._last_command = VelocityCommand(forward, 0.0, reason)
+            if speed != 0.0:
+                self._arm_watchdog()
+            else:
+                self._cancel_watchdog()
+            return self._last_command
+
     async def send_direct_yaw(
         self, lease: str, yaw_rps: float, reason: str = "direct_yaw"
     ) -> VelocityCommand:
@@ -286,6 +458,37 @@ class UnitreeMotionAdapter:
             self._last_command = VelocityCommand(0.0, yaw, reason)
             if yaw != 0.0:
                 self._arm_watchdog()
+            return self._last_command
+
+    async def send_direct_navigation(
+        self,
+        lease: str,
+        command: VelocityCommand,
+    ) -> VelocityCommand:
+        """Send one watchdog-protected, forward-only Nav2 command."""
+
+        forward = self._bounded_forward(command.forward_mps)
+        yaw = self._bounded_yaw(command.yaw_rps)
+        async with self._lock:
+            self._require_owner(
+                lease, required_mode="direct_navigation"
+            )
+            self._cancel_watchdog()
+            try:
+                await self._success(
+                    self.sport.Move, forward, 0.0, yaw
+                )
+            except Exception as exc:
+                self._fault = f"direct navigation command failed: {exc}"
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(self._fault) from exc
+            self._last_command = VelocityCommand(
+                forward, yaw, command.reason
+            )
+            if forward != 0.0 or yaw != 0.0:
+                self._arm_watchdog()
+            else:
+                self._cancel_watchdog()
             return self._last_command
 
     async def release(self, lease: str) -> None:

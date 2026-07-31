@@ -78,6 +78,21 @@ class FakeRuntime:
     async def stop_demo(self) -> dict[str, object]:
         return {"mission": {"active": False}}
 
+    async def prepare_pointing(self, confirmation: str) -> dict[str, object]:
+        return {
+            "pointing": {"prepared": True, "phase": "prepared"},
+            "confirmation": confirmation,
+        }
+
+    async def start_pointing(self, confirmation: str) -> dict[str, object]:
+        return {
+            "pointing": {"active": True, "phase": "starting"},
+            "confirmation": confirmation,
+        }
+
+    async def stop_pointing(self) -> dict[str, object]:
+        return {"pointing": {"active": False, "phase": "aborted_safely"}}
+
     async def set_final_approach_distance(
         self, distance_m: float
     ) -> dict[str, object]:
@@ -256,6 +271,32 @@ def test_final_approach_calibration_is_bounded(tmp_path: Path) -> None:
             "/api/calibration/final-approach",
             json={"distance_m": 0.31},
         ).status_code == 409
+
+
+def test_pointing_policy_endpoints_are_explicit_and_stoppable(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.html").write_text("ok")
+    runtime = FakeRuntime()
+
+    with TestClient(create_app(runtime, tmp_path)) as client:  # type: ignore[arg-type]
+        prepared = client.post(
+            "/api/pointing/prepare",
+            json={"confirmation": "WOOF IS CLEAR FOR STANDING POINT"},
+        )
+        assert prepared.status_code == 200
+        assert prepared.json()["pointing"]["prepared"] is True
+
+        started = client.post(
+            "/api/pointing/run",
+            json={"confirmation": "AREA IS CLEAR AND WOOF MAY MOVE"},
+        )
+        assert started.status_code == 200
+        assert started.json()["pointing"]["active"] is True
+
+        stopped = client.post("/api/pointing/stop")
+        assert stopped.status_code == 200
+        assert stopped.json()["pointing"]["active"] is False
 
 
 def test_voice_service_can_report_and_start_an_allowlisted_mission(

@@ -13,6 +13,8 @@ from .fruit import FruitDetector
 from .heading import SportModeHeadingProvider
 from .mission import MissionConfig
 from .motion import MotionConfig, create_motion, initialize_dds
+from .nav2_return import Nav2ReturnClient, Nav2ReturnClientConfig
+from .pointing import PointingPolicyConfig, PointingPolicyManager
 from .runtime import CollieRuntime
 
 
@@ -64,12 +66,29 @@ def build_runtime() -> CollieRuntime:
         arrival_hello_settle_s=float(
             os.environ.get("COLLIE_ARRIVAL_HELLO_SETTLE_S", "0.35")
         ),
+        arrival_rest_enabled=env_bool("COLLIE_ARRIVAL_REST_ENABLED"),
+        arrival_rest_duration_s=float(
+            os.environ.get("COLLIE_ARRIVAL_REST_DURATION_S", "5.0")
+        ),
+        arrival_pointing_enabled=env_bool("COLLIE_ARRIVAL_POINTING_ENABLED"),
+        arrival_pointing_label=os.environ.get(
+            "COLLIE_ARRIVAL_POINTING_LABEL", "all"
+        ),
+        arrival_pointing_timeout_s=float(
+            os.environ.get("COLLIE_ARRIVAL_POINTING_TIMEOUT_S", "20.0")
+        ),
         return_home_enabled=env_bool("COLLIE_RETURN_HOME_ENABLED"),
+        return_backend=os.environ.get(
+            "COLLIE_RETURN_BACKEND", "local_odometry"
+        ).strip(),
+        nav2_poll_period_s=float(
+            os.environ.get("COLLIE_NAV2_POLL_PERIOD_S", "0.10")
+        ),
         return_arrival_tolerance_m=float(
             os.environ.get("COLLIE_RETURN_ARRIVAL_TOLERANCE_M", "0.25")
         ),
         return_heading_tolerance_rad=math.radians(
-            float(os.environ.get("COLLIE_RETURN_HEADING_TOLERANCE_DEG", "10"))
+            float(os.environ.get("COLLIE_RETURN_HEADING_TOLERANCE_DEG", "5.0"))
         ),
         return_heading_gate_rad=math.radians(
             float(os.environ.get("COLLIE_RETURN_HEADING_GATE_DEG", "30"))
@@ -80,6 +99,23 @@ def build_runtime() -> CollieRuntime:
         return_yaw_gain=float(
             os.environ.get("COLLIE_RETURN_YAW_GAIN", "1.2")
         ),
+        return_turn_minimum_yaw_rps=float(
+            os.environ.get("COLLIE_RETURN_TURN_MINIMUM_YAW_RPS", "0.35")
+        ),
+        return_turn_response_timeout_s=float(
+            os.environ.get("COLLIE_RETURN_TURN_RESPONSE_TIMEOUT_S", "0.75")
+        ),
+        return_turn_response_min_progress_rad=math.radians(
+            float(
+                os.environ.get(
+                    "COLLIE_RETURN_TURN_RESPONSE_MIN_PROGRESS_DEG",
+                    "2.0",
+                )
+            )
+        ),
+        return_turn_recovery_settle_s=float(
+            os.environ.get("COLLIE_RETURN_TURN_RECOVERY_SETTLE_S", "1.0")
+        ),
         return_timeout_s=float(
             os.environ.get("COLLIE_RETURN_TIMEOUT_S", "20")
         ),
@@ -89,6 +125,77 @@ def build_runtime() -> CollieRuntime:
         return_stall_min_progress_m=float(
             os.environ.get("COLLIE_RETURN_STALL_MIN_PROGRESS_M", "0.06")
         ),
+        return_clearance_backoff_m=float(
+            os.environ.get("COLLIE_RETURN_CLEARANCE_BACKOFF_M", "0.25")
+        ),
+        return_clearance_reverse_mps=float(
+            os.environ.get("COLLIE_RETURN_CLEARANCE_REVERSE_MPS", "0.10")
+        ),
+        return_clearance_timeout_s=float(
+            os.environ.get("COLLIE_RETURN_CLEARANCE_TIMEOUT_S", "4.0")
+        ),
+        return_clearance_stall_timeout_s=float(
+            os.environ.get(
+                "COLLIE_RETURN_CLEARANCE_STALL_TIMEOUT_S", "1.25"
+            )
+        ),
+        return_clearance_min_progress_m=float(
+            os.environ.get(
+                "COLLIE_RETURN_CLEARANCE_MIN_PROGRESS_M", "0.01"
+            )
+        ),
+        return_clearance_home_behind_rad=math.radians(
+            float(
+                os.environ.get(
+                    "COLLIE_RETURN_CLEARANCE_HOME_BEHIND_DEG", "120"
+                )
+            )
+        ),
+        return_pose_capture_duration_s=float(
+            os.environ.get("COLLIE_RETURN_POSE_CAPTURE_DURATION_S", "0.40")
+        ),
+        return_pose_capture_max_drift_m=float(
+            os.environ.get("COLLIE_RETURN_POSE_CAPTURE_MAX_DRIFT_M", "0.04")
+        ),
+        return_pose_capture_max_yaw_drift_rad=math.radians(
+            float(
+                os.environ.get(
+                    "COLLIE_RETURN_POSE_CAPTURE_MAX_YAW_DRIFT_DEG",
+                    "4.0",
+                )
+            )
+        ),
+        return_pose_settle_duration_s=float(
+            os.environ.get("COLLIE_RETURN_POSE_SETTLE_DURATION_S", "0.50")
+        ),
+        return_pose_settle_timeout_s=float(
+            os.environ.get("COLLIE_RETURN_POSE_SETTLE_TIMEOUT_S", "3.0")
+        ),
+        return_pose_settle_max_drift_m=float(
+            os.environ.get("COLLIE_RETURN_POSE_SETTLE_MAX_DRIFT_M", "0.01")
+        ),
+        return_pose_settle_max_yaw_drift_rad=math.radians(
+            float(
+                os.environ.get(
+                    "COLLIE_RETURN_POSE_SETTLE_MAX_YAW_DRIFT_DEG",
+                    "2.0",
+                )
+            )
+        ),
+        return_max_distance_m=float(
+            os.environ.get("COLLIE_RETURN_MAX_DISTANCE_M", "3.0")
+        ),
+        return_max_odometry_step_m=float(
+            os.environ.get("COLLIE_RETURN_MAX_ODOMETRY_STEP_M", "0.15")
+        ),
+        return_max_odometry_yaw_step_rad=math.radians(
+            float(
+                os.environ.get(
+                    "COLLIE_RETURN_MAX_ODOMETRY_YAW_STEP_DEG",
+                    "30.0",
+                )
+            )
+        ),
         capture_timeout_s=float(
             os.environ.get("COLLIE_MEMORY_CAPTURE_TIMEOUT_S", "2.0")
         ),
@@ -97,6 +204,12 @@ def build_runtime() -> CollieRuntime:
         ),
         approach_misses_allowed=int(
             os.environ.get("COLLIE_APPROACH_MATCH_MISSES", "2")
+        ),
+        approach_reacquire_attempts=int(
+            os.environ.get("COLLIE_APPROACH_REACQUIRE_ATTEMPTS", "3")
+        ),
+        approach_reacquire_timeout_s=float(
+            os.environ.get("COLLIE_APPROACH_REACQUIRE_TIMEOUT_S", "10.0")
         ),
         turn_angle_rad=math.radians(
             float(os.environ.get("COLLIE_TURN_ANGLE_DEG", "180"))
@@ -147,7 +260,7 @@ def build_runtime() -> CollieRuntime:
             os.environ.get("COLLIE_FINAL_APPROACH_STALL_TIMEOUT_S", "1.0")
         ),
         final_approach_stall_min_progress_m=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_STALL_MIN_PROGRESS_M", "0.01")
+            os.environ.get("COLLIE_FINAL_APPROACH_STALL_MIN_PROGRESS_M", "0.001")
         ),
     )
     controller_config = ApproachConfig(
@@ -166,6 +279,7 @@ def build_runtime() -> CollieRuntime:
                     mission_config.return_forward_mps,
                     mission_config.final_approach_mps,
                 ),
+                maximum_reverse_mps=mission_config.return_clearance_reverse_mps,
                 maximum_yaw_rps=max(
                     controller_config.maximum_yaw_rps,
                     mission_config.turn_rate_rps,
@@ -187,11 +301,52 @@ def build_runtime() -> CollieRuntime:
         if motion_enabled
         else None
     )
+    pointing = PointingPolicyManager(
+        PointingPolicyConfig(
+            enabled=env_bool("COLLIE_POINTING_ENABLED"),
+            policy_path=Path(
+                os.environ.get(
+                    "COLLIE_POINTING_POLICY",
+                    "models/pointing/locked_point_actor.jit",
+                )
+            ),
+            network_interface=network_interface or "enP8p1s0",
+            status_url=os.environ.get(
+                "COLLIE_POINTING_STATUS_URL",
+                "http://127.0.0.1:8096/api/status",
+            ),
+            duration_s=float(
+                os.environ.get("COLLIE_POINTING_DURATION_S", "6.0")
+            ),
+            action_gain=float(
+                os.environ.get("COLLIE_POINTING_ACTION_GAIN", "1.0")
+            ),
+            maximum_target_rate_rad_s=float(
+                os.environ.get("COLLIE_POINTING_MAX_RATE_RAD_S", "0.60")
+            ),
+            kp=float(os.environ.get("COLLIE_POINTING_KP", "60.0")),
+            kd=float(os.environ.get("COLLIE_POINTING_KD", "5.0")),
+            standup_seconds=float(
+                os.environ.get("COLLIE_POINTING_STANDUP_SECONDS", "3.0")
+            ),
+            standup_kp=float(
+                os.environ.get("COLLIE_POINTING_STANDUP_KP", "60.0")
+            ),
+            standup_kd=float(
+                os.environ.get("COLLIE_POINTING_STANDUP_KD", "5.0")
+            ),
+            direct_standing_handoff=env_bool(
+                "COLLIE_POINTING_DIRECT_STANDING_HANDOFF",
+                default=True,
+            ),
+        )
+    )
     return CollieRuntime(
         camera=create_camera(),
         controller=ApproachController(controller_config),
         motion=motion,
         motion_enabled=motion_enabled,
+        pointing=pointing,
         allow_unranged_forward=allow_unranged,
         produce_detector=FruitDetector(
             produce_model,
@@ -202,7 +357,7 @@ def build_runtime() -> CollieRuntime:
             device=os.environ.get("COLLIE_INFERENCE_DEVICE", "").strip() or None,
             task=os.environ.get("COLLIE_PRODUCE_TASK", "").strip() or None,
         ),
-        loop_hz=float(os.environ.get("COLLIE_CAMERA_HZ", "30")),
+        loop_hz=float(os.environ.get("COLLIE_CAMERA_HZ", "10")),
         annotated_hz=float(os.environ.get("COLLIE_ANNOTATED_HZ", "5")),
         produce_revalidation_misses_required=int(
             os.environ.get("COLLIE_REVALIDATION_MISSES", "3")
@@ -224,6 +379,22 @@ def build_runtime() -> CollieRuntime:
             else None
         ),
         mission_config=mission_config,
+        nav2_return=(
+            Nav2ReturnClient(
+                Nav2ReturnClientConfig(
+                base_url=os.environ.get(
+                    "COLLIE_NAV2_URL", "http://127.0.0.1:8100"
+                ),
+                    request_timeout_s=float(
+                        os.environ.get(
+                            "COLLIE_NAV2_REQUEST_TIMEOUT_S", "2.0"
+                        )
+                    ),
+                )
+            )
+            if mission_config.return_backend == "nav2"
+            else None
+        ),
     )
 
 

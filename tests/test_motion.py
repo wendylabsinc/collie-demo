@@ -12,8 +12,10 @@ class FakeSport:
         self.stop_calls = 0
         self.stop_result = 0
         self.balance_stand_calls = 0
+        self.stand_up_calls = 0
         self.hello_calls = 0
         self.stretch_calls = 0
+        self.standdown_calls = 0
         self.timeout_s: float | None = None
         self.moves: list[tuple[float, float, float]] = []
         self.current_move = (0.0, 0.0, 0.0)
@@ -27,8 +29,14 @@ class FakeSport:
     def BalanceStand(self) -> int:
         self.balance_stand_calls += 1
         return 0
+    def StandUp(self) -> int:
+        self.stand_up_calls += 1
+        return 0
     def Hello(self) -> int:
         self.hello_calls += 1
+        return 0
+    def StandDown(self) -> int:
+        self.standdown_calls += 1
         return 0
     def Stretch(self) -> int:
         self.stretch_calls += 1
@@ -81,6 +89,60 @@ def test_motion_uses_avoidance_and_clamps_forward_speed() -> None:
         sent = await motion.send(lease, VelocityCommand(1.0, 0.0, "test"))
         assert sent.forward_mps == 0.08
         assert avoidance.moves[-1] == (0.08, 0.0, 0.0)
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_private_reverse_clearance_is_bounded_and_watchdog_protected() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(
+            sport,
+            avoidance,
+            MotionConfig(
+                maximum_reverse_mps=0.06,
+                command_watchdog_s=0.03,
+            ),
+        )
+        await motion.initialize()
+        lease = await motion.arm()
+
+        sent = await motion.send_reverse_clearance(
+            lease,
+            1.0,
+            "return_clearance_test",
+        )
+
+        assert sent.forward_mps == -0.06
+        assert sent.yaw_rps == 0.0
+        assert avoidance.moves[-1] == (-0.06, 0.0, 0.0)
+        assert motion.status()["limits"]["reverse_mps"] == 0.06
+        await asyncio.sleep(0.08)
+        assert motion.armed is False
+        assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_general_navigation_still_rejects_reverse() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+        lease = await motion.arm()
+
+        try:
+            await motion.send(
+                lease,
+                VelocityCommand(-0.01, 0.0, "public_reverse_forbidden"),
+            )
+        except ValueError as exc:
+            assert "non-negative" in str(exc)
+        else:
+            raise AssertionError("general navigation accepted reverse motion")
+        assert not any(move[0] < 0.0 for move in avoidance.moves)
         await motion.close()
 
     asyncio.run(scenario())
@@ -235,6 +297,62 @@ def test_direct_yaw_rejects_unexpected_stopmove_failure() -> None:
     asyncio.run(scenario())
 
 
+def test_direct_navigation_uses_sport_with_forward_only_watchdog() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(
+            sport,
+            avoidance,
+            MotionConfig(
+                maximum_forward_mps=0.12,
+                maximum_yaw_rps=0.30,
+                command_watchdog_s=0.03,
+            ),
+        )
+        await motion.initialize()
+        lease = await motion.arm_direct_navigation()
+
+        sent = await motion.send_direct_navigation(
+            lease, VelocityCommand(1.0, -1.0, "nav2_path")
+        )
+
+        assert sent.forward_mps == 0.12
+        assert sent.yaw_rps == -0.30
+        assert sport.moves == [(0.12, 0.0, -0.30)]
+        assert avoidance.enabled is False
+        assert avoidance.remote is False
+        assert avoidance.moves == []
+        assert motion.status()["mode"] == "direct_navigation"
+        assert motion.status()["external_collision_planner_required"] is True
+        await asyncio.sleep(0.08)
+        assert motion.armed is False
+        assert sport.stop_calls >= 2
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_direct_navigation_rejects_reverse_before_hardware_command() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+        lease = await motion.arm_direct_navigation()
+
+        try:
+            await motion.send_direct_navigation(
+                lease, VelocityCommand(-0.01, 0.0, "reverse_forbidden")
+            )
+        except ValueError as exc:
+            assert "non-negative" in str(exc)
+        else:
+            raise AssertionError("direct Nav2 lease accepted reverse motion")
+        assert sport.moves == []
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
 def test_hello_uses_stock_skill_while_motion_remains_disarmed() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
@@ -250,6 +368,51 @@ def test_hello_uses_stock_skill_while_motion_remains_disarmed() -> None:
         assert avoidance.remote is False
         assert motion.armed is False
         assert motion.status()["last_command"]["reason"] == "hello_gesture_complete"
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_standdown_prepares_the_pointing_pose_while_motion_is_disarmed() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+
+        await motion.perform_standdown(settle_s=0.0)
+
+        assert sport.standdown_calls == 1
+        assert sport.stop_calls == 1
+        assert avoidance.enabled is False
+        assert avoidance.remote is False
+        assert motion.armed is False
+        assert (
+            motion.status()["last_command"]["reason"]
+            == "pointing_standdown_complete"
+        )
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_stand_up_recovers_posture_before_return_home() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+
+        await motion.perform_stand_up(settle_s=0.0)
+
+        assert sport.stand_up_calls == 1
+        assert sport.balance_stand_calls == 1
+        assert sport.stop_calls == 1
+        assert avoidance.enabled is False
+        assert avoidance.remote is False
+        assert motion.armed is False
+        assert (
+            motion.status()["last_command"]["reason"]
+            == "pointing_stand_up_complete"
+        )
         await motion.close()
 
     asyncio.run(scenario())

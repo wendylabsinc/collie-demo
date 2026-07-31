@@ -86,6 +86,12 @@ def test_memory_demo_ui_keeps_stop_and_manual_fallback() -> None:
     assert "Manual follower fallback" in html
     assert "FIND THIS ${saved.label.toUpperCase()} & RETURN" in html
     assert "return_home_status" in html
+    assert 'id="nav-status"' in html
+    assert "Return planner: Nav2 map frame" in html
+    assert "local odometry fallback" in html
+    assert "no global obstacle-detour planning" in html
+    assert "nav2_health" in html
+    assert "scan_healthy" in html
     assert "search_progress_deg" in html
     assert "search_sweep_deg" in html
     assert "detector_confidence" in html
@@ -96,7 +102,7 @@ def test_memory_demo_ui_keeps_stop_and_manual_fallback() -> None:
     assert "FIND A DIFFERENT" not in html
     assert "Fruit to reject" not in html
     assert 'id="stop"' in html
-    assert "following||demoActive||startingFollow||startingDemo" in html
+    assert "following||demoActive||pointingActive||startingFollow" in html
 
 
 def test_touch_range_is_calibrated_as_measured_distance() -> None:
@@ -107,6 +113,8 @@ def test_touch_range_is_calibrated_as_measured_distance() -> None:
     assert 'min="2" max="30"' in html
     assert "Extra measured travel" in html
     assert "final_approach_measured_distance_m" in html
+    assert "arrival_pointing_status" in html
+    assert "contact_status" in html
     assert (
         "await api('/api/calibration/final-approach',{distance_m:cm/100})"
         in html
@@ -116,17 +124,74 @@ def test_touch_range_is_calibrated_as_measured_distance() -> None:
 def test_voice_mission_ui_exposes_live_mic_and_emergency_controls() -> None:
     html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
 
-    assert "Say: “Find the apple”" in html
+    assert "Say just: “apple”, “banana”, or “pear”" in html
+    assert "without the Hello or Stretch gestures" in html
+    assert "lie down for five seconds, stand up" in html
+    assert (
+        "follow the configured return planner to the captured start pose and heading"
+        in html
+    )
+    assert "listen for the next fruit" in html
     assert 'id="voice-state"' in html
     assert 'id="voice-live"' in html
     assert 'id="voice-start"' in html
     assert 'id="voice-stop"' in html
     assert 'id="voice-bark"' in html
+    assert 'id="voice-command-input"' in html
+    assert 'id="voice-submit"' in html
+    assert "Type a fruit instead of speaking" in html
+    assert "RUN FULL SEQUENCE" in html
+    assert "approach → lie down/stand up → planned return Home" in html
+    assert "No additional Go click is required." in html
+    assert "No more input is needed; Woof will return Home on its own." in html
+    assert "voice_mission_complete_ready" in html
+    assert "voiceApi('/api/command',{command:fruit})" in html
+    assert "voiceCommandForm.onsubmit=submitTypedFruit" in html
     assert ":8098/api/status" not in html  # assembled from the shared origin
     assert "webrtc_connected" in html
     assert "scribe_connected" in html
     assert "last_partial" in html
     assert "mic_source" in html
+    assert "mission_busy" in html
+    assert "arrival_bark_status" in html
     assert "voiceStart.onclick" in html
     assert "voiceStop.onclick" in html
     assert "voiceBark.onclick" in html
+
+
+def test_live_pointing_ui_prepares_standing_policy_and_keeps_guarded_stop() -> None:
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+
+    assert "Experimental pointing policy (manual only)" in html
+    assert 'id="pointing-prepare"' in html
+    assert 'id="pointing-run"' in html
+    assert 'id="pointing-stop"' in html
+    assert "WOOF IS CLEAR FOR STANDING POINT" in html
+    assert "AREA IS CLEAR AND WOOF MAY MOVE" in html
+    assert "RUN 6.0s STANDING POINT" in html
+    assert "await api(path,confirmation?{confirmation}:undefined)" in html
+    assert "renderPointing(s)" in html
+    assert "There is no bypass button." in html
+    assert "--bypass-roll-guard" not in html
+
+
+def test_mission_ui_describes_stock_posture_and_configured_return_home() -> None:
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+
+    assert "lie down for five seconds, stand up" in html
+    assert "saved start pose and heading" in html
+    assert "home_pose_validation" in html
+    assert "maximum_position_span_m" in html
+    assert "arrival_pointing_status" in html
+
+
+def test_stage_image_uses_stock_posture_instead_of_autonomous_pointing() -> None:
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
+
+    assert "COLLIE_ARRIVAL_REST_ENABLED=1" in dockerfile
+    assert "COLLIE_ARRIVAL_REST_DURATION_S=5.0" in dockerfile
+    assert "COLLIE_ARRIVAL_POINTING_ENABLED=0" in dockerfile
+    assert "COLLIE_RETURN_POSE_CAPTURE_DURATION_S=0.50" in dockerfile
+    assert "COLLIE_RETURN_HOME_ENABLED=1" in dockerfile
+    assert "COLLIE_RETURN_ARRIVAL_TOLERANCE_M=0.10" in dockerfile
+    assert "COLLIE_RETURN_HEADING_TOLERANCE_DEG=5.0" in dockerfile
