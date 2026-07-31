@@ -57,7 +57,6 @@ class AvoidanceClientProtocol(Protocol):
 @dataclass(frozen=True, slots=True)
 class MotionConfig:
     maximum_forward_mps: float = 0.08
-    maximum_reverse_mps: float = 0.10
     maximum_yaw_rps: float = 0.25
     command_watchdog_s: float = 0.35
     rpc_timeout_s: float = 0.75
@@ -69,14 +68,6 @@ class MotionConfig:
     client_timeout_s: float = 12.0
     avoidance_verify_interval_s: float = 0.30
     remote_api_settle_s: float = 0.0
-
-    def __post_init__(self) -> None:
-        if (
-            not math.isfinite(self.maximum_reverse_mps)
-            or self.maximum_reverse_mps <= 0.0
-        ):
-            raise ValueError("maximum_reverse_mps must be positive")
-
 
 class UnitreeMotionAdapter:
     def __init__(
@@ -125,7 +116,6 @@ class UnitreeMotionAdapter:
             "watchdog_s": self.config.command_watchdog_s,
             "limits": {
                 "forward_mps": self.config.maximum_forward_mps,
-                "reverse_mps": self.config.maximum_reverse_mps,
                 "yaw_rps": self.config.maximum_yaw_rps,
                 "lateral_mps": 0.0,
             },
@@ -341,11 +331,6 @@ class UnitreeMotionAdapter:
                 reason="pointing_stand_up_complete"
             )
 
-    async def perform_balance_stand(self, *, settle_s: float = 1.0) -> None:
-        """Compatibility alias for the complete locomotion recovery."""
-
-        await self.perform_stand_up(settle_s=settle_s)
-
     async def perform_stretch(self, *, settle_s: float = 0.0) -> None:
         """Run the stock stretch once while locomotion remains disarmed."""
 
@@ -398,43 +383,6 @@ class UnitreeMotionAdapter:
                 raise MotionNotReady(self._fault) from exc
             self._last_command = VelocityCommand(forward, yaw, command.reason)
             if forward != 0.0 or yaw != 0.0:
-                self._arm_watchdog()
-            else:
-                self._cancel_watchdog()
-            return self._last_command
-
-    async def send_reverse_clearance(
-        self,
-        lease: str,
-        reverse_mps: float,
-        reason: str = "return_clearance",
-    ) -> VelocityCommand:
-        """Back away under avoidance for the private return-home controller.
-
-        General navigation remains forward-only. This separate method keeps
-        reverse unavailable to browser/API callers while preserving the same
-        owner checks, obstacle-avoidance verification, and stale-command
-        watchdog used by normal navigation.
-        """
-
-        speed = float(reverse_mps)
-        if not math.isfinite(speed) or speed < 0.0:
-            raise ValueError("reverse speed must be finite and non-negative")
-        speed = min(speed, self.config.maximum_reverse_mps)
-        forward = -speed
-        async with self._lock:
-            self._require_owner(lease, required_mode="avoidance")
-            self._cancel_watchdog()
-            try:
-                if speed != 0.0:
-                    await self._verify_avoidance_if_due()
-                await self._success(self.avoidance.Move, forward, 0.0, 0.0)
-            except Exception as exc:
-                self._fault = f"reverse clearance command failed: {exc}"
-                await self._release_locked(use_stop=True)
-                raise MotionNotReady(self._fault) from exc
-            self._last_command = VelocityCommand(forward, 0.0, reason)
-            if speed != 0.0:
                 self._arm_watchdog()
             else:
                 self._cancel_watchdog()

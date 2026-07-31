@@ -125,32 +125,6 @@ def build_runtime() -> CollieRuntime:
         return_stall_min_progress_m=float(
             os.environ.get("COLLIE_RETURN_STALL_MIN_PROGRESS_M", "0.06")
         ),
-        return_clearance_backoff_m=float(
-            os.environ.get("COLLIE_RETURN_CLEARANCE_BACKOFF_M", "0.25")
-        ),
-        return_clearance_reverse_mps=float(
-            os.environ.get("COLLIE_RETURN_CLEARANCE_REVERSE_MPS", "0.10")
-        ),
-        return_clearance_timeout_s=float(
-            os.environ.get("COLLIE_RETURN_CLEARANCE_TIMEOUT_S", "4.0")
-        ),
-        return_clearance_stall_timeout_s=float(
-            os.environ.get(
-                "COLLIE_RETURN_CLEARANCE_STALL_TIMEOUT_S", "1.25"
-            )
-        ),
-        return_clearance_min_progress_m=float(
-            os.environ.get(
-                "COLLIE_RETURN_CLEARANCE_MIN_PROGRESS_M", "0.01"
-            )
-        ),
-        return_clearance_home_behind_rad=math.radians(
-            float(
-                os.environ.get(
-                    "COLLIE_RETURN_CLEARANCE_HOME_BEHIND_DEG", "120"
-                )
-            )
-        ),
         return_pose_capture_duration_s=float(
             os.environ.get("COLLIE_RETURN_POSE_CAPTURE_DURATION_S", "0.40")
         ),
@@ -279,7 +253,6 @@ def build_runtime() -> CollieRuntime:
                     mission_config.return_forward_mps,
                     mission_config.final_approach_mps,
                 ),
-                maximum_reverse_mps=mission_config.return_clearance_reverse_mps,
                 maximum_yaw_rps=max(
                     controller_config.maximum_yaw_rps,
                     mission_config.turn_rate_rps,

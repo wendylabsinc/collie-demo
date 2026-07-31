@@ -1,5 +1,9 @@
 # Collie Demo
 
+See [`docs/repository-map.md`](docs/repository-map.md) for the intended Border
+Collie routine, the code path for each step, current deployment gaps, and the
+cleanup/verification plan.
+
 A self-contained Wendy app for Woof that can save a locally detected fruit class,
 turn around, recognize a fresh fruit of that class, safely approach it, and return
 to its saved start pose. The

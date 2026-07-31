@@ -94,38 +94,6 @@ def test_motion_uses_avoidance_and_clamps_forward_speed() -> None:
     asyncio.run(scenario())
 
 
-def test_private_reverse_clearance_is_bounded_and_watchdog_protected() -> None:
-    async def scenario() -> None:
-        sport, avoidance = FakeSport(), FakeAvoidance()
-        motion = UnitreeMotionAdapter(
-            sport,
-            avoidance,
-            MotionConfig(
-                maximum_reverse_mps=0.06,
-                command_watchdog_s=0.03,
-            ),
-        )
-        await motion.initialize()
-        lease = await motion.arm()
-
-        sent = await motion.send_reverse_clearance(
-            lease,
-            1.0,
-            "return_clearance_test",
-        )
-
-        assert sent.forward_mps == -0.06
-        assert sent.yaw_rps == 0.0
-        assert avoidance.moves[-1] == (-0.06, 0.0, 0.0)
-        assert motion.status()["limits"]["reverse_mps"] == 0.06
-        await asyncio.sleep(0.08)
-        assert motion.armed is False
-        assert avoidance.moves[-1] == (0.0, 0.0, 0.0)
-        await motion.close()
-
-    asyncio.run(scenario())
-
-
 def test_general_navigation_still_rejects_reverse() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()

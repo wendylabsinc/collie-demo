@@ -72,14 +72,6 @@ ProduceTrackerFactory = Callable[
 ]
 
 
-def create_produce_tracker(
-    bgr: object, bbox_xywh: tuple[int, int, int, int]
-) -> ProduceTrackerProtocol:
-    tracker = cv2.TrackerMIL_create()
-    tracker.init(bgr, bbox_xywh)
-    return tracker
-
-
 def _detect_frame(
     detector: ProduceDetectorProtocol, frame: CameraFrame
 ) -> list[FruitDetection]:
@@ -476,41 +468,6 @@ class CollieRuntime:
                 time.monotonic() + self.navigation_command_lease_s
             )
             return await self.navigation_status()
-
-    async def _navigation_reverse_clearance(
-        self, reverse_mps: float
-    ) -> None:
-        """Renew the private, avoidance-protected return-clearance heartbeat."""
-
-        async with self._action_lock:
-            if self._motion_owner != "navigation":
-                raise RuntimeCommandError("navigation motion is not armed")
-            if (
-                self.motion is None
-                or self._lease is None
-                or not self.motion.armed
-            ):
-                self._lease = None
-                self._motion_owner = None
-                self._navigation_deadline = None
-                raise RuntimeCommandError("navigation motion is not armed")
-            try:
-                self._command = await self.motion.send_reverse_clearance(
-                    self._lease,
-                    reverse_mps,
-                    "return_clearance",
-                )
-            except (MotionError, ValueError) as exc:
-                self._lease = None
-                self._motion_owner = None
-                self._navigation_deadline = None
-                self._command = VelocityCommand(
-                    reason="return_clearance_motion_fault"
-                )
-                raise RuntimeCommandError(str(exc)) from exc
-            self._navigation_deadline = (
-                time.monotonic() + self.navigation_command_lease_s
-            )
 
     async def _direct_turn_arm(self) -> None:
         """Acquire the private yaw-only SportClient lease for the demo turn."""
@@ -940,7 +897,9 @@ class CollieRuntime:
             hint = detection.center
             try:
                 reference_crop = await asyncio.to_thread(
-                    lambda: crop_bbox(frame.bgr, detection.bbox_xyxy)
+                    crop_bbox,
+                    frame.bgr,
+                    detection.bbox_xyxy,
                 )
             except ValueError:
                 await asyncio.sleep(0)
@@ -3528,16 +3487,6 @@ class CollieRuntime:
             flush=True,
         )
 
-        # Reverse clearance proved unreliable on the real Go2: after the
-        # arrival posture transition, the avoidance API could acknowledge the
-        # reverse command without producing motion, preventing the actual
-        # return turn from ever starting. The paired StandUp/BalanceStand
-        # transition now restores locomotion, so proceed directly to the same
-        # measured, avoidance-protected turn used elsewhere in the demo.
-        async with self._state_lock:
-            self._mission.return_clearance_status = "skipped_for_normal_turn"
-            self._mission.return_clearance_progress_m = 0.0
-
         # Woof normally faces the reached fruit, about 180 degrees away from
         # Home. Reorient before translation so obstacle avoidance only has to
         # make small steering corrections while walking.
@@ -3733,7 +3682,6 @@ class CollieRuntime:
             self._mission.return_turn_status = (
                 "prealigning" if local_home is not None else "owned_by_nav2"
             )
-            self._mission.return_clearance_status = "owned_by_nav2"
             self._mission.nav2_status = {
                 "state": "starting",
                 "reason": "submitting saved map-frame Home",
@@ -3895,173 +3843,6 @@ class CollieRuntime:
             if self._nav2_return_active:
                 await self.nav2_return.cancel("collie_return_finished")
                 self._nav2_return_active = False
-
-    async def _create_return_clearance(
-        self,
-        home: Pose2D,
-        *,
-        initial_pose: Pose2D,
-        initial_distance: float,
-        deadline: float,
-    ) -> None:
-        """Create measured space behind the reached object before turning."""
-
-        if self.heading_provider is None:
-            raise RuntimeCommandError("fresh Go2 local pose is unavailable")
-        maximum_backoff = max(
-            0.0,
-            initial_distance
-            - self.mission_config.return_arrival_tolerance_m,
-        )
-        target_backoff = min(
-            self.mission_config.return_clearance_backoff_m,
-            maximum_backoff,
-        )
-        if target_backoff <= 0.0:
-            async with self._state_lock:
-                self._mission.return_clearance_status = "not_needed"
-            return
-
-        started_at = time.monotonic()
-        clearance_deadline = min(
-            deadline,
-            started_at + self.mission_config.return_clearance_timeout_s,
-        )
-        best_reverse_progress = 0.0
-        last_progress_at = started_at
-        last_pose = initial_pose
-        last_log_at = 0.0
-        reverse_axis_x = -math.cos(initial_pose.yaw_rad)
-        reverse_axis_y = -math.sin(initial_pose.yaw_rad)
-        await self.navigation_arm(NAVIGATION_ARM_CONFIRMATION)
-        async with self._state_lock:
-            self._mission.return_clearance_status = "running"
-            self._mission.return_clearance_progress_m = 0.0
-            self._mission.reason = "return_home_creating_turn_clearance"
-        print(
-            "return_home_clearance event=start "
-            f"target_m={target_backoff:.3f} "
-            f"reverse_mps={self.mission_config.return_clearance_reverse_mps:.3f}",
-            flush=True,
-        )
-
-        while time.monotonic() < clearance_deadline:
-            now = time.monotonic()
-            sample = self.heading_provider.status()
-            if not sample.pose_healthy:
-                raise RuntimeCommandError(
-                    "Go2 local pose became stale during return clearance"
-                )
-            assert (
-                sample.x_m is not None
-                and sample.y_m is not None
-                and sample.yaw_rad is not None
-            )
-            odometry_step_m = math.hypot(
-                sample.x_m - last_pose.x_m,
-                sample.y_m - last_pose.y_m,
-            )
-            odometry_yaw_step_rad = abs(
-                normalize_angle(sample.yaw_rad - last_pose.yaw_rad)
-            )
-            if (
-                odometry_step_m
-                > self.mission_config.return_max_odometry_step_m
-            ):
-                raise RuntimeCommandError(
-                    "Go2 local odometry jumped "
-                    f"{odometry_step_m:.2f} m during return clearance"
-                )
-            if (
-                odometry_yaw_step_rad
-                > self.mission_config.return_max_odometry_yaw_step_rad
-            ):
-                raise RuntimeCommandError(
-                    "Go2 local heading jumped "
-                    f"{math.degrees(odometry_yaw_step_rad):.1f} degrees "
-                    "during return clearance"
-                )
-            last_pose = Pose2D(
-                sample.x_m,
-                sample.y_m,
-                sample.yaw_rad,
-            )
-            delta_x = sample.x_m - initial_pose.x_m
-            delta_y = sample.y_m - initial_pose.y_m
-            reverse_progress = (
-                delta_x * reverse_axis_x + delta_y * reverse_axis_y
-            )
-            lateral_displacement = abs(
-                delta_x * -reverse_axis_y + delta_y * reverse_axis_x
-            )
-            home_distance = math.hypot(
-                home.x_m - sample.x_m,
-                home.y_m - sample.y_m,
-            )
-            if home_distance > initial_distance + 0.03:
-                raise RuntimeCommandError(
-                    "return clearance moved away from Home"
-                )
-            if reverse_progress >= target_backoff:
-                await self.stop("return_home_clearance_complete")
-                async with self._state_lock:
-                    self._mission.return_clearance_status = "complete"
-                    self._mission.return_clearance_progress_m = (
-                        reverse_progress
-                    )
-                    self._mission.return_distance_m = home_distance
-                    self._mission.return_progress_m = max(
-                        0.0, initial_distance - home_distance
-                    )
-                print(
-                    "return_home_clearance event=complete "
-                    f"elapsed_s={now - started_at:.3f} "
-                    f"reverse_progress_m={reverse_progress:.3f} "
-                    f"lateral_m={lateral_displacement:.3f} "
-                    f"home_distance_m={home_distance:.3f}",
-                    flush=True,
-                )
-                return
-
-            if (
-                reverse_progress - best_reverse_progress
-                >= self.mission_config.return_clearance_min_progress_m
-            ):
-                best_reverse_progress = reverse_progress
-                last_progress_at = now
-            elif (
-                now - last_progress_at
-                >= self.mission_config.return_clearance_stall_timeout_s
-            ):
-                raise RuntimeCommandError(
-                    "return clearance stalled before the departure turn"
-                )
-
-            await self._navigation_reverse_clearance(
-                self.mission_config.return_clearance_reverse_mps
-            )
-            async with self._state_lock:
-                self._mission.return_clearance_progress_m = max(
-                    0.0, reverse_progress
-                )
-                self._mission.return_distance_m = home_distance
-                self._mission.return_progress_m = max(
-                    0.0, initial_distance - home_distance
-                )
-            if now - last_log_at >= 0.25:
-                last_log_at = now
-                print(
-                    "return_home_clearance event=progress "
-                    f"elapsed_s={now - started_at:.3f} "
-                    f"reverse_progress_m={reverse_progress:.3f} "
-                    f"lateral_m={lateral_displacement:.3f} "
-                    f"home_distance_m={home_distance:.3f}",
-                    flush=True,
-                )
-            await asyncio.sleep(0.05)
-        raise RuntimeCommandError(
-            "return clearance timed out before the departure turn"
-        )
 
     async def _wait_for_stable_return_pose(
         self, *, deadline: float

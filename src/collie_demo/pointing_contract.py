@@ -50,24 +50,6 @@ UNITREE_JOINT_ORDER = (
 # For each Isaac-order value, the motor index in Unitree LowState/LowCmd.
 ISAAC_TO_UNITREE_MOTOR_INDEX = (3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8)
 
-# This is the actual default used in Isaac during training.  The calf values
-# were clipped to the Isaac/MuJoCo joint limit; it intentionally differs from
-# Woof's measured built-in Sit values below.
-ISAAC_GROUNDED_SIT_RAD = (
-    0.0716288675,
-    1.2460068195,
-    -2.70,
-    -0.0683550522,
-    1.2439890466,
-    -2.70,
-    0.4025715036,
-    1.2751952262,
-    -2.70,
-    -0.3932350988,
-    1.2788276997,
-    -2.70,
-)
-
 ISAAC_GROUNDED_STAND_RAD = tuple(
     NOMINAL_STAND_JOINT_POSITIONS_RAD[name] for name in ISAAC_JOINT_ORDER
 )
@@ -86,11 +68,6 @@ WOOF_BUILTIN_STANDDOWN_RAD = (
     1.2788276997,
     -2.7953930345,
 )
-
-# Compatibility alias for older reports written before the built-in action was
-# identified correctly.  These angles are from SportClient.StandDown(), not
-# SportClient.Sit().
-WOOF_BUILTIN_SIT_RAD = WOOF_BUILTIN_STANDDOWN_RAD
 
 # Limits from the Unitree Go2 model used for the contact calibration.  A real
 # runner must still confirm these against the exact hardware/firmware model.
@@ -249,70 +226,6 @@ def projected_gravity_wxyz(quaternion_wxyz: Sequence[float]) -> tuple[float, flo
         -2.0 * (x * z - w * y),
         -2.0 * (y * z + w * x),
         -(1.0 - 2.0 * (x * x + y * y)),
-    )
-
-
-def build_actor_observation(
-    *,
-    base_linear_velocity_body: Sequence[float],
-    base_angular_velocity_body: Sequence[float],
-    gravity_body: Sequence[float],
-    joint_position_isaac: Sequence[float],
-    joint_velocity_isaac: Sequence[float],
-    previous_action: Sequence[float],
-    bbox_xyxy_normalized: Sequence[float],
-) -> tuple[float, ...]:
-    """Build the exact 49-value observation used by the exported actor."""
-
-    groups = (
-        ("base_linear_velocity_body", base_linear_velocity_body, 3),
-        ("base_angular_velocity_body", base_angular_velocity_body, 3),
-        ("gravity_body", gravity_body, 3),
-        ("joint_position_isaac", joint_position_isaac, 12),
-        ("joint_velocity_isaac", joint_velocity_isaac, 12),
-        ("previous_action", previous_action, 12),
-        ("bbox_xyxy_normalized", bbox_xyxy_normalized, 4),
-    )
-    for name, values, expected in groups:
-        if len(values) != expected:
-            raise ValueError(f"{name} must contain {expected} values, got {len(values)}")
-
-    joint_position_relative = tuple(
-        float(position) - default
-        for position, default in zip(
-            joint_position_isaac, ISAAC_GROUNDED_SIT_RAD, strict=True
-        )
-    )
-    observation = tuple(
-        float(value)
-        for values in (
-            base_linear_velocity_body,
-            base_angular_velocity_body,
-            gravity_body,
-            joint_position_relative,
-            joint_velocity_isaac,
-            previous_action,
-            bbox_xyxy_normalized,
-        )
-        for value in values
-    )
-    if len(observation) != 49:
-        raise AssertionError(f"actor observation has {len(observation)} values")
-    if not all(math.isfinite(value) for value in observation):
-        raise ValueError("actor observation contains non-finite values")
-    return observation
-
-
-def actor_action_to_joint_target(action: Sequence[float]) -> tuple[float, ...]:
-    """Apply the training-time action scale without clamping or rate limiting."""
-
-    if len(action) != 12:
-        raise ValueError(f"actor action must contain 12 values, got {len(action)}")
-    if not all(math.isfinite(float(value)) for value in action):
-        raise ValueError("actor action contains non-finite values")
-    return tuple(
-        default + 0.5 * float(value)
-        for default, value in zip(ISAAC_GROUNDED_SIT_RAD, action, strict=True)
     )
 
 
@@ -615,9 +528,3 @@ def standdown_error_rad(joint_position_isaac: Sequence[float]) -> tuple[float, f
     )
     rms = math.sqrt(sum(error * error for error in errors) / len(errors))
     return rms, max(abs(error) for error in errors)
-
-
-def sit_error_rad(joint_position_isaac: Sequence[float]) -> tuple[float, float]:
-    """Deprecated compatibility alias for :func:`standdown_error_rad`."""
-
-    return standdown_error_rad(joint_position_isaac)

@@ -56,12 +56,6 @@ class MissionConfig:
     return_timeout_s: float = 20.0
     return_stall_timeout_s: float = 3.0
     return_stall_min_progress_m: float = 0.06
-    return_clearance_backoff_m: float = 0.25
-    return_clearance_reverse_mps: float = 0.10
-    return_clearance_timeout_s: float = 4.0
-    return_clearance_stall_timeout_s: float = 1.25
-    return_clearance_min_progress_m: float = 0.01
-    return_clearance_home_behind_rad: float = math.radians(120.0)
     return_pose_capture_duration_s: float = 0.40
     return_pose_capture_max_drift_m: float = 0.04
     return_pose_capture_max_yaw_drift_rad: float = math.radians(4.0)
@@ -141,12 +135,6 @@ class MissionConfig:
             "return_timeout_s",
             "return_stall_timeout_s",
             "return_stall_min_progress_m",
-            "return_clearance_backoff_m",
-            "return_clearance_reverse_mps",
-            "return_clearance_timeout_s",
-            "return_clearance_stall_timeout_s",
-            "return_clearance_min_progress_m",
-            "return_clearance_home_behind_rad",
             "return_pose_capture_duration_s",
             "return_pose_capture_max_drift_m",
             "return_pose_capture_max_yaw_drift_rad",
@@ -240,8 +228,6 @@ class MissionTelemetry:
     return_distance_m: float | None = None
     return_heading_error_rad: float | None = None
     return_progress_m: float = 0.0
-    return_clearance_status: str = "not_requested"
-    return_clearance_progress_m: float = 0.0
     return_turn_status: str = "not_requested"
     return_turn_recovery_count: int = 0
 
@@ -297,10 +283,6 @@ class MissionTelemetry:
             if self.return_heading_error_rad is None
             else round(math.degrees(self.return_heading_error_rad), 1),
             "return_progress_m": round(self.return_progress_m, 3),
-            "return_clearance_status": self.return_clearance_status,
-            "return_clearance_progress_m": round(
-                self.return_clearance_progress_m, 3
-            ),
             "return_turn_status": self.return_turn_status,
             "return_turn_recovery_count": self.return_turn_recovery_count,
         }
