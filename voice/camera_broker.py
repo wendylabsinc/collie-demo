@@ -73,10 +73,9 @@ class CameraBrokerState:
         self._continuous_fresh_started_at: float | None = None
         self._last_session_fresh_duration_s = 0.0
 
-    def begin_session(self, *, now: float | None = None) -> str:
+    def begin_session(self) -> str:
         """Rotate generation and clear all bytes before a connection attempt."""
 
-        current = self._clock() if now is None else float(now)
         with self._condition:
             self._generation_counter += 1
             if self._generation_counter > 1:

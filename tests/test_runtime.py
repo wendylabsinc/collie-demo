@@ -603,27 +603,6 @@ class PostRestTurnHandoffPose(MotionCoupledPose):
         return sample
 
 
-class LateralOnlyClearancePose(MotionCoupledPose):
-    """Move sideways under reverse commands without rearward progress."""
-
-    def status(self) -> HeadingSample:
-        sample = super().status()
-        if self.avoidance.moves and self.avoidance.moves[-1][0] < 0.0:
-            self.x_m = 0.45
-            self.y_m = 0.06
-            return HeadingSample(
-                self.yaw,
-                0.0,
-                True,
-                None,
-                self.x_m,
-                self.y_m,
-                True,
-                None,
-            )
-        return sample
-
-
 class CallbackStretchSport(FakeSport):
     def __init__(self, on_stretch: Callable[[], None]) -> None:
         super().__init__()
@@ -1835,11 +1814,6 @@ def test_return_home_uses_configured_avoidance_turn_before_translation() -> None
             status = await runtime.status()
             assert status["mission"]["return_home_status"] == "complete"
             assert status["mission"]["return_distance_m"] <= 0.02
-            assert (
-                status["mission"]["return_clearance_status"]
-                == "skipped_for_normal_turn"
-            )
-            assert status["mission"]["return_clearance_progress_m"] == 0.0
             assert not any(abs(move[2]) > 0.0 for move in sport.moves)
             first_turn = next(
                 index
@@ -1902,10 +1876,6 @@ def test_return_home_waits_for_post_standup_odometry_before_turning() -> None:
             status = await runtime.status()
             assert pose.settling_samples_remaining == 0
             assert pose.first_turn_x_m == pytest.approx(0.51, abs=0.002)
-            assert (
-                status["mission"]["return_clearance_status"]
-                == "skipped_for_normal_turn"
-            )
             assert status["mission"]["return_home_status"] == "complete"
             assert status["armed"] is False
         finally:
@@ -2024,7 +1994,7 @@ def test_return_turn_uses_minimum_yaw_floor_near_target() -> None:
     asyncio.run(scenario())
 
 
-def test_return_home_normal_turn_never_requests_reverse_clearance() -> None:
+def test_return_home_never_commands_reverse_motion() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
         pose = MotionCoupledPose(avoidance, sport)
@@ -2053,11 +2023,6 @@ def test_return_home_normal_turn_never_requests_reverse_clearance() -> None:
             await runtime._return_home()
             status = await runtime.status()
             assert status["mission"]["return_home_status"] == "complete"
-            assert (
-                status["mission"]["return_clearance_status"]
-                == "skipped_for_normal_turn"
-            )
-            assert status["mission"]["return_clearance_progress_m"] == 0.0
             assert not any(move[0] < 0.0 for move in avoidance.moves)
         finally:
             await runtime.close()

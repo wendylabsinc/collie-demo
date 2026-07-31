@@ -82,7 +82,7 @@ def test_camera_state_exact_status_generation_and_freshness() -> None:
     assert disconnected["ready"] is False
     assert disconnected["stale_reconnect_count"] == 1
 
-    generation_two = state.begin_session(now=11.0)
+    generation_two = state.begin_session()
     assert generation_two == "process.2"
     assert generation_two != generation
     assert state.status(now=11.0)["frame_id"] is None

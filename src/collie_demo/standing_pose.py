@@ -71,14 +71,9 @@ GROUNDED_STAND_ROOT_QUAT_WXYZ = (
 
 GO2_FRONT_CALF_LIMIT_RAD = -0.83776
 LOCKED_POINT_CALF_MARGIN_RAD = 0.11
-FRONT_HIP_FORWARD_M = 0.19
-MINIMUM_POINT_EXTENSION_FRACTION = 0.85
 
 _POINT_CALF_RAD = GO2_FRONT_CALF_LIMIT_RAD - LOCKED_POINT_CALF_MARGIN_RAD
 _POINT_THIGH_RAD = -math.pi / 2.0 - _POINT_CALF_RAD / 2.0
-LOCKED_POINT_REACH_FROM_HIP_M = (
-    2.0 * GO2_THIGH_LENGTH_M * math.cos(abs(_POINT_CALF_RAD) / 2.0)
-)
 
 LOCKED_POINT_FR_JOINTS_RAD = {
     "FR_hip_joint": 0.0,
@@ -86,41 +81,11 @@ LOCKED_POINT_FR_JOINTS_RAD = {
     "FR_calf_joint": _POINT_CALF_RAD,
 }
 
-LOCKED_POINT_EXTENSION_FRACTION = LOCKED_POINT_REACH_FROM_HIP_M / (
-    GO2_THIGH_LENGTH_M + GO2_CALF_LENGTH_M
-)
-
 BALANCE_ACTUATED_JOINTS = tuple(
     name
     for name in NOMINAL_STAND_JOINT_POSITIONS_RAD
     if not name.startswith("FR_")
 )
-
-
-def locked_point_joint_positions() -> dict[str, float]:
-    """Return the nominal stance with the front-right leg fully pointing."""
-
-    pose = dict(NOMINAL_STAND_JOINT_POSITIONS_RAD)
-    pose.update(LOCKED_POINT_FR_JOINTS_RAD)
-    return pose
-
-
-def front_paw_in_base_frame(
-    thigh_rad: float,
-    calf_rad: float,
-) -> tuple[float, float]:
-    """Return the front paw's forward position and height in the base frame."""
-
-    forward = -(
-        GO2_THIGH_LENGTH_M * math.sin(thigh_rad)
-        + GO2_CALF_LENGTH_M * math.sin(thigh_rad + calf_rad)
-    )
-    drop = (
-        GO2_THIGH_LENGTH_M * math.cos(thigh_rad)
-        + GO2_CALF_LENGTH_M * math.cos(thigh_rad + calf_rad)
-    )
-    return FRONT_HIP_FORWARD_M + forward, STANDING_TRUNK_HEIGHT_M - drop
-
 
 LOCKED_POINT_SETUP_S = 1.0
 LOCKED_POINT_RAMP_S = 1.0
