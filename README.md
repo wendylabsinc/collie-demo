@@ -27,6 +27,55 @@ with Nav2. The stage image now selects that backend by default, while the
 separate gateway remains fail-closed until the real Hesai mount transform and
 live mapping pipeline are qualified on Woof.
 
+## Full demo sequence
+
+The canonical audience-facing demo is:
+
+1. **Verify preflight.** Confirm that the camera, fruit detector, motion
+   controller, microphone, and configured return-home backend report ready.
+2. **Face the person.** Position Woof facing the person who will give the
+   command. Automatic person-facing alignment is not implemented yet.
+3. **Wait for a command.** Woof remains stopped and listens.
+4. **Request a fruit.** Say an allowlisted fruit command such as `pear`, or type
+   the fruit into the UI. Exact `Go to ...` phrase support is planned but is not
+   currently part of the voice allowlist.
+5. **Acknowledge the command.** Woof barks to confirm the requested fruit.
+6. **Capture Home.** Woof records its starting position and heading. The Nav2
+   backend also captures a stable map-frame Home pose.
+7. **Turn toward the search area.** Woof performs a measured approximately
+   180-degree turn.
+8. **Search for the fruit.** If the requested fruit is not visible, Woof runs a
+   bounded rotational search.
+9. **Confirm the fruit.** Multiple fresh detector results must agree on the
+   requested class before approach motion is allowed.
+10. **Release Go.** Voice and typed full-sequence missions release Go
+    automatically. The manual remember-and-find workflow waits for the
+    operator's **Go to Fruit** button.
+11. **Walk to the fruit.** Woof steers toward the fresh target while monitoring
+    camera age, target age, obstacle avoidance, and motion watchdogs.
+12. **Confirm arrival.** Repeated lower-camera detections establish that Woof is
+    close; a final bounded 10 cm approach may complete the arrival.
+13. **Stop at the fruit.** All walking commands stop and the active motion lease
+    is released.
+14. **Lie down and bark.** Woof runs Unitree `StandDown`, and the voice service
+    plays the arrival bark while the rest status is `holding`.
+15. **Hold the pose.** Woof remains down for approximately five seconds.
+16. **Stand for the return.** Woof runs `StandUp` followed by `BalanceStand` so
+    locomotion is active again.
+17. **Stabilize localization.** The runtime waits for fresh, stationary
+    odometry before starting the return leg.
+18. **Turn toward Home.** Woof calculates the direction of the saved start pose
+    and performs a measured departure turn.
+19. **Walk back to Home.** Nav2 follows a mapped obstacle-aware path; the
+    diagnostic local-odometry backend follows a bounded forward-only route.
+20. **Restore the original heading.** At the saved position, Woof turns to
+    match its original orientation and face the starting direction again.
+21. **Report success and reset.** The UI reports success, voice returns to
+    listening, and the demo is ready for the next fruit command.
+
+`STOP NOW`, a stop voice command, stale camera data, target loss, localization
+loss, or a motion-watchdog failure must stop Woof during any movement phase.
+
 ## Current behavior
 
 - Bundles the local PyTorch source checkpoint and Woof-specific TensorRT FP16
