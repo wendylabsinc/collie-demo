@@ -1,0 +1,34 @@
+{
+  "test_id": "CAM-MAIN-001",
+  "status": "completed_failed",
+  "mode": "read_only",
+  "method": "new TCP connection per request with curl phase timings",
+  "target_ip": "192.168.0.107",
+  "samples_per_service": 120,
+  "failure_threshold_ms": 1000,
+  "services": {
+    "main_8096": {
+      "failures": 1,
+      "connect_mean_ms": 125.566,
+      "connect_maximum_ms": 900.359,
+      "pre_response_mean_ms": 125.642,
+      "pre_response_maximum_ms": 675.202,
+      "transfer_mean_ms": 0.814,
+      "transfer_maximum_ms": 28.454,
+      "total_mean_ms": 252.022,
+      "total_maximum_ms": 1091.985
+    },
+    "camera_8098": {
+      "failures": 3,
+      "connect_mean_ms": 122.706,
+      "connect_maximum_ms": 915.874,
+      "pre_response_mean_ms": 105.795,
+      "pre_response_maximum_ms": 664.718,
+      "transfer_mean_ms": 0.183,
+      "transfer_maximum_ms": 2.279,
+      "total_mean_ms": 228.684,
+      "total_maximum_ms": 1270.609
+    }
+  },
+  "conclusion": "Both ports experienced comparable connection and pre-response latency while response transfer stayed fast. The evidence points to shared network or host scheduling latency, not an 8096-only status handler or a frozen camera pipeline."
+}

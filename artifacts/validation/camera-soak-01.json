@@ -1,0 +1,35 @@
+{
+  "test_id": "CAM-SOAK-001",
+  "completed_at": "2026-07-31T22:25:54Z",
+  "result": "failed",
+  "planned_duration_s": 1800,
+  "observed_duration_s": 112.482,
+  "stopped_early": true,
+  "stop_reason": "zero-failure acceptance criterion was violated",
+  "motion_commands_sent": false,
+  "samples": {
+    "total": 226,
+    "healthy": 225,
+    "failed": 1
+  },
+  "failure": {
+    "elapsed_s": 74.6,
+    "main_status_request_ms": 1046.785,
+    "camera_status_request_ms": 3005.615,
+    "main_status_error": "http://woof.local:8096/api/status timed out",
+    "camera_status_error": "http://woof.local:8098/api/camera/status timed out",
+    "sample_gap_s": 4.3518
+  },
+  "recovery": {
+    "recovered_on_next_sample": true,
+    "camera_generation_changes": 0,
+    "maximum_broker_frame_age_s_outside_failed_request": 0.139,
+    "maximum_detector_age_s_outside_failed_request": 0.216
+  },
+  "diagnosis": {
+    "status": "not_yet_attributed",
+    "observation": "Both device HTTP endpoints timed out together and recovered without a WebRTC generation change.",
+    "next_test": "Repeat against the resolved device IP to separate mDNS or client-network delay from an application stall."
+  },
+  "snapshot": "camera-soak-01.jpg"
+}

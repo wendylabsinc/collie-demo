@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Woof Forward Calibration</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#0b1511;color:#eef7f1;font:16px system-ui,sans-serif}main{max-width:520px;margin:32px auto;padding:20px}.card{border:1px solid #315244;border-radius:16px;padding:20px;background:#102019}h1{margin:0 0 8px;font-size:24px}p{color:#b8c9c0}.row{display:grid;grid-template-columns:110px 1fr;gap:12px;align-items:center;margin:16px 0}output,input,button{font:inherit}input[type=number]{width:100%;padding:12px;border-radius:10px;border:1px solid #52705f;background:#09110e;color:#fff}button{width:100%;padding:14px;border:0;border-radius:10px;font-weight:800;cursor:pointer}.pulse{background:#efb34c;color:#191207}.stop{margin-top:10px;background:#d94343;color:#fff}.answer{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.yes{background:#39b978}.no{background:#718078;color:#fff}button:disabled{opacity:.4;cursor:not-allowed}.check{display:flex;gap:10px;align-items:flex-start;margin:18px 0}.status{min-height:24px;color:#f3cb78}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{text-align:left;padding:8px;border-bottom:1px solid #294238}.lowest{font-size:18px;color:#74dfa8;font-weight:800}.back{display:inline-block;margin-top:16px;color:#9ed9ba}
+</style>
+<main>
+  <div class="card">
+    <h1>Lowest forward speed</h1>
+    <p>One 0.4 second pulse. It stops automatically.</p>
+    <div class="row"><strong>Direction</strong><output>forward</output></div>
+    <div class="row"><label for="amount"><strong>Amount</strong></label><div><input id="amount" type="number" step="any" value="0.05"> <small>m/s</small></div></div>
+    <label class="check"><input id="ready" type="checkbox"> <span>Path clear and I am ready to press STOP.</span></label>
+    <button id="pulse" class="pulse" disabled>FORWARD PULSE</button>
+    <button id="stop" class="stop">STOP</button>
+    <div id="status" class="status">Idle and stopped.</div>
+    <div class="answer">
+      <button id="yes" class="yes" disabled>MOVEMENT? YES</button>
+      <button id="no" class="no" disabled>MOVEMENT? NO</button>
+    </div>
+    <p id="lowest" class="lowest">Lowest YES: —</p>
+    <table>
+      <thead><tr><th>Direction</th><th>Amount</th><th>Movement?</th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+  </div>
+  <a class="back" href="/tests">Back to mini tests</a>
+</main>
+<script>
+const amount=document.querySelector('#amount'),ready=document.querySelector('#ready'),pulse=document.querySelector('#pulse'),stop=document.querySelector('#stop'),yes=document.querySelector('#yes'),no=document.querySelector('#no'),statusLine=document.querySelector('#status'),results=document.querySelector('#results'),lowest=document.querySelector('#lowest');
+let running=false,pendingAmount=null,answers=[];
+function validAmount(){const n=Number(amount.value);return Number.isFinite(n)&&n>=0}
+function render(){pulse.disabled=running||!ready.checked||!validAmount();amount.disabled=running;ready.disabled=running;yes.disabled=running||pendingAmount===null;no.disabled=running||pendingAmount===null;results.innerHTML=answers.map(x=>`<tr><td>forward</td><td>${String(x.amount)} m/s</td><td>${x.moved?'YES':'NO'}</td></tr>`).join('');const yesValues=answers.filter(x=>x.moved).map(x=>x.amount);lowest.textContent=`Lowest YES: ${yesValues.length?String(Math.min(...yesValues))+' m/s':'—'}`}
+async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Request failed');return data}
+pulse.onclick=async()=>{running=true;pendingAmount=null;statusLine.textContent='Pulsing forward…';render();try{const value=Number(amount.value);const result=await api('/api/calibration/forward-pulse',{amount_mps:value,confirmation:'PATH CLEAR AND STOP READY'});if(!result.stopped)throw new Error('STOP was not confirmed');pendingAmount=value;statusLine.textContent='Stopped. Did Woof move?'}catch(error){statusLine.textContent=`Stopped: ${error.message}`;await api('/api/stop').catch(()=>{})}finally{running=false;render()}};
+stop.onclick=async()=>{statusLine.textContent='Stopping…';await api('/api/stop').catch(()=>{});running=false;pendingAmount=null;statusLine.textContent='STOPPED';render()};
+function answer(moved){answers.unshift({amount:pendingAmount,moved});pendingAmount=null;statusLine.textContent='Result saved. Set any amount for the next pulse.';render()}
+yes.onclick=()=>answer(true);no.onclick=()=>answer(false);ready.onchange=render;amount.oninput=render;addEventListener('pagehide',()=>navigator.sendBeacon('/api/stop'));render();
+</script>
+</html>

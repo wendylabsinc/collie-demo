@@ -46,6 +46,11 @@ DEMO_CONFIRMATION = "TARGET SAVED AND AREA CLEAR"
 DEMO_GO_CONFIRMATION = "CLASS LOCKED AND PATH CLEAR"
 VOICE_MISSION_CONFIRMATION = "VOICE COMMAND HEARD"
 POSTURE_STAND_CONFIRMATION = "WOOF IS CLEAR TO STAND"
+FORWARD_CALIBRATION_CONFIRMATION = "PATH CLEAR AND STOP READY"
+NAV2_FORWARD_CALIBRATION_CONFIRMATION = (
+    "PATH CLEAR NO AVOIDANCE STOP READY"
+)
+FORWARD_CALIBRATION_DURATION_S = 0.40
 
 
 class CameraProtocol(Protocol):
@@ -192,15 +197,13 @@ class CollieRuntime:
         self.mission_config = mission_config or MissionConfig()
         self.pointing = pointing
         self.nav2_return = nav2_return
-        self._final_approach_distance_m = (
-            self.mission_config.final_approach_distance_m
-        )
         self._state_lock = asyncio.Lock()
         self._stream_condition = asyncio.Condition()
         self._action_lock = asyncio.Lock()
         # Serializes long stock gestures/capture with the low-level pointing
         # handoff. A memory-save Hello must never race policy startup.
         self._exclusive_skill_lock = asyncio.Lock()
+        self._forward_calibration_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._produce_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -463,6 +466,43 @@ class CollieRuntime:
                 self._motion_owner = None
                 self._navigation_deadline = None
                 self._command = VelocityCommand(reason="navigation_motion_fault")
+                raise RuntimeCommandError(str(exc)) from exc
+            self._navigation_deadline = (
+                time.monotonic() + self.navigation_command_lease_s
+            )
+            return await self.navigation_status()
+
+    async def _send_final_push(self) -> dict[str, object]:
+        """Send the fixed off-screen push without widening navigation limits."""
+
+        async with self._action_lock:
+            if self._motion_owner != "navigation":
+                raise RuntimeCommandError("final push motion is not armed")
+            if (
+                self.motion is None
+                or self._lease is None
+                or not self.motion.armed
+            ):
+                self._lease = None
+                self._motion_owner = None
+                self._navigation_deadline = None
+                raise RuntimeCommandError("final push motion is not armed")
+            try:
+                if self.mission_config.return_backend == "nav2":
+                    self._command = await self.motion.send_direct_final_push(
+                        self._lease,
+                        self.mission_config.final_push_mps,
+                    )
+                else:
+                    self._command = await self.motion.send_avoidance_final_push(
+                        self._lease,
+                        self.mission_config.final_push_mps,
+                    )
+            except (MotionError, ValueError) as exc:
+                self._lease = None
+                self._motion_owner = None
+                self._navigation_deadline = None
+                self._command = VelocityCommand(reason="final_push_motion_fault")
                 raise RuntimeCommandError(str(exc)) from exc
             self._navigation_deadline = (
                 time.monotonic() + self.navigation_command_lease_s
@@ -1428,37 +1468,167 @@ class CollieRuntime:
             self._mission.reason = "operator_stop"
         return await self.status()
 
-    async def set_final_approach_distance(
-        self, distance_m: float
+    async def run_forward_calibration(
+        self,
+        amount_mps: float,
+        confirmation: str,
     ) -> dict[str, object]:
-        """Set the measured post-vision creep distance while Woof is idle."""
+        """Run one factory-avoidance deadband probe with automatic STOP."""
 
-        distance_m = float(distance_m)
-        if not math.isfinite(distance_m) or not 0.02 <= distance_m <= 0.30:
-            raise RuntimeCommandError(
-                "final approach distance must be between 0.02 and 0.30 m"
-            )
-        async with self._action_lock:
-            self._require_pointing_idle()
-            mission_active = bool(
-                self._mission_task is not None and not self._mission_task.done()
-            )
-            if (
-                self._lease is not None
-                or self._motion_owner is not None
-                or mission_active
-                or (self.motion is not None and self.motion.armed)
-            ):
-                raise RuntimeCommandError(
-                    "stop Woof before changing final approach calibration"
-                )
-            self._final_approach_distance_m = distance_m
-        print(
-            "final_approach calibration "
-            f"distance_m={distance_m:.3f}",
-            flush=True,
+        return await self._run_forward_calibration(
+            amount_mps=amount_mps,
+            confirmation=confirmation,
+            expected_confirmation=FORWARD_CALIBRATION_CONFIRMATION,
+            owner="forward_calibration",
+            direct_navigation=False,
         )
-        return await self.status()
+
+    async def run_nav2_forward_calibration(
+        self,
+        amount_mps: float,
+        confirmation: str,
+    ) -> dict[str, object]:
+        """Probe the exact direct SportClient path used by Nav2 return."""
+
+        return await self._run_forward_calibration(
+            amount_mps=amount_mps,
+            confirmation=confirmation,
+            expected_confirmation=NAV2_FORWARD_CALIBRATION_CONFIRMATION,
+            owner="nav2_forward_calibration",
+            direct_navigation=True,
+        )
+
+    async def _run_forward_calibration(
+        self,
+        *,
+        amount_mps: float,
+        confirmation: str,
+        expected_confirmation: str,
+        owner: str,
+        direct_navigation: bool,
+    ) -> dict[str, object]:
+        """Run one short forward-only probe through a selected motion path."""
+
+        amount_mps = float(amount_mps)
+        if confirmation.strip().upper() != expected_confirmation:
+            raise RuntimeCommandError(
+                f'type exactly "{expected_confirmation}"'
+            )
+        if not math.isfinite(amount_mps) or amount_mps < 0.0:
+            raise RuntimeCommandError(
+                "forward calibration amount must be finite and non-negative"
+            )
+
+        async with self._forward_calibration_lock:
+            async with self._action_lock:
+                self._require_pointing_idle()
+                mission_active = bool(
+                    self._mission_task is not None
+                    and not self._mission_task.done()
+                )
+                if mission_active:
+                    raise RuntimeCommandError(
+                        "stop the fruit mission before forward calibration"
+                    )
+                if not self.motion_enabled or self.motion is None:
+                    raise RuntimeCommandError("motion backend is disabled")
+                if self._lease is not None or self.motion.armed:
+                    raise RuntimeCommandError(
+                        "motion is already owned; stop it first"
+                    )
+                try:
+                    if direct_navigation:
+                        lease = await self.motion.arm_direct_navigation()
+                    else:
+                        lease = await self.motion.arm()
+                except MotionError as exc:
+                    raise RuntimeCommandError(str(exc)) from exc
+                self._lease = lease
+                self._motion_owner = owner
+                self._navigation_deadline = None
+                self._last_pulse_at = None
+                self._command = VelocityCommand(
+                    reason=f"{owner}_armed_zero"
+                )
+
+            started_at = time.monotonic()
+            command_count = 0
+            sent_amount_mps = 0.0
+            try:
+                while True:
+                    remaining_s = (
+                        FORWARD_CALIBRATION_DURATION_S
+                        - (time.monotonic() - started_at)
+                    )
+                    if remaining_s <= 0.0:
+                        break
+                    async with self._action_lock:
+                        if (
+                            self.motion is None
+                            or self._lease != lease
+                            or self._motion_owner != owner
+                            or not self.motion.armed
+                        ):
+                            raise RuntimeCommandError(
+                                "forward calibration was stopped"
+                            )
+                        try:
+                            if direct_navigation:
+                                self._command = (
+                                    await self.motion.send_unbounded_direct_forward_calibration(
+                                        lease,
+                                        amount_mps,
+                                        owner,
+                                    )
+                                )
+                            else:
+                                self._command = (
+                                    await self.motion.send_unbounded_forward_calibration(
+                                        lease,
+                                        amount_mps,
+                                        owner,
+                                    )
+                                )
+                            sent_amount_mps = self._command.forward_mps
+                        except (MotionError, ValueError) as exc:
+                            raise RuntimeCommandError(str(exc)) from exc
+                    command_count += 1
+                    await asyncio.sleep(
+                        min(self.follow_period_s, remaining_s)
+                    )
+            finally:
+                await self.stop(f"{owner}_complete")
+
+            navigation = await self.navigation_status()
+            print(
+                f"{owner} "
+                f"requested_amount_mps={amount_mps} "
+                f"sent_amount_mps={sent_amount_mps} "
+                f"duration_s={FORWARD_CALIBRATION_DURATION_S:.2f} "
+                f"commands={command_count} stopped={not navigation['armed']}",
+                flush=True,
+            )
+            return {
+                "direction": "forward",
+                "motion_path": (
+                    "direct_sportclient"
+                    if direct_navigation
+                    else "factory_avoidance"
+                ),
+                "requested_amount_mps": amount_mps,
+                "amount_mps": sent_amount_mps,
+                "pulse_duration_s": FORWARD_CALIBRATION_DURATION_S,
+                "movement": None,
+                "command_count": command_count,
+                "factory_avoidance_enabled": not direct_navigation,
+                "calibration_speed_limit_enabled": False,
+                "configured_motion_limit_mps": (
+                    self.motion.config.maximum_forward_mps
+                    if direct_navigation and self.motion is not None
+                    else None
+                ),
+                "stopped": not navigation["armed"],
+            }
 
     async def pulse(self) -> dict[str, object]:
         async with self._action_lock:
@@ -1775,10 +1945,9 @@ class CollieRuntime:
                     "arrival_rest_duration_s": (
                         self.mission_config.arrival_rest_duration_s
                     ),
-                    "final_approach_distance_m": self._final_approach_distance_m,
-                    "final_approach_mps": self.mission_config.final_approach_mps,
-                    "final_approach_timeout_s": (
-                        self.mission_config.final_approach_timeout_s
+                    "final_push_mps": self.mission_config.final_push_mps,
+                    "final_push_duration_s": (
+                        self.mission_config.final_push_duration_s
                     ),
                     "active": mission_active,
                     "return_home_enabled": self.mission_config.return_home_enabled,
@@ -3174,16 +3343,6 @@ class CollieRuntime:
                     >= self.mission_config.near_bbox_height_ratio
                 ):
                     return "target_visible_in_pointing_range"
-                if (
-                    not self._arrival_pointing_required(memory.label)
-                    and near_target_seen
-                    and associated
-                ):
-                    # Stable lower-frame geometry means the floor object has
-                    # reached Woof's calibrated rest range. Stop while the
-                    # class is still positively associated instead of waiting
-                    # for it to disappear under the camera and walking over it.
-                    return "target_visible_near_arrival"
                 if near_target_recent and result.best is None:
                     return "target_class_reached_camera_edge"
                 if failures >= self.mission_config.approach_misses_allowed:
@@ -3243,63 +3402,53 @@ class CollieRuntime:
         raise RuntimeCommandError("saved fruit approach timed out")
 
     async def _run_final_approach(self, approach_reason: str) -> str:
-        """Advance a measured, calibrated distance after a verified edge loss."""
+        """Send one bounded push after a near fruit leaves the camera edge."""
 
-        if approach_reason == "target_visible_near_arrival":
-            async with self._state_lock:
-                self._mission.reason = (
-                    "stable_near_target_arrival_continuing_to_standdown"
-                )
-                self._mission.final_approach_status = "skipped_near_target"
-                self._mission.final_approach_elapsed_s = 0.0
-                self._mission.final_approach_commanded_distance_m = 0.0
-                self._mission.final_approach_measured_distance_m = 0.0
-            print(
-                "final_approach event=skipped "
-                "reason=stable_near_target_arrival",
-                flush=True,
-            )
-            return "stable_near_target_arrival"
         if approach_reason != "target_class_reached_camera_edge":
             raise RuntimeCommandError(
-                f"final approach unavailable after {approach_reason}"
+                "final push requires the confirmed fruit to leave the "
+                f"camera edge, got {approach_reason}"
             )
         if self.heading_provider is None:
             raise RuntimeCommandError(
-                "fresh Go2 local pose is unavailable for final approach"
+                "fresh Go2 local pose is unavailable for final push"
             )
         initial = self.heading_provider.status()
         if not initial.pose_healthy:
             raise RuntimeCommandError(
-                "fresh Go2 local pose is unavailable for final approach"
+                "fresh Go2 local pose is unavailable for final push"
             )
         assert initial.x_m is not None and initial.y_m is not None
         start_x = initial.x_m
         start_y = initial.y_m
-        target_distance = self._final_approach_distance_m
-        started_at = time.monotonic()
-        deadline = started_at + self.mission_config.final_approach_timeout_s
-        last_tick_at = started_at
-        best_distance = 0.0
-        last_progress_at = started_at
-        commanded_distance = 0.0
         async with self._state_lock:
             self._mission.phase = MissionPhase.FINAL_APPROACHING
-            self._mission.reason = "measured_touch_range_approach"
+            self._mission.reason = "fruit_offscreen_final_push"
             self._mission.final_approach_status = "running"
             self._mission.final_approach_elapsed_s = 0.0
             self._mission.final_approach_commanded_distance_m = 0.0
             self._mission.final_approach_measured_distance_m = 0.0
         print(
-            "final_approach event=start "
-            f"target_distance_m={target_distance:.3f} "
-            f"speed_mps={self.mission_config.final_approach_mps:.3f} "
-            f"timeout_s={self.mission_config.final_approach_timeout_s:.2f}",
+            "final_push event=start "
+            f"trigger={approach_reason} "
+            f"speed_mps={self.mission_config.final_push_mps:.3f} "
+            f"duration_s={self.mission_config.final_push_duration_s:.2f}",
             flush=True,
         )
         await self.navigation_arm(NAVIGATION_ARM_CONFIRMATION)
-        while time.monotonic() < deadline:
+        started_at = time.monotonic()
+        deadline = started_at + self.mission_config.final_push_duration_s
+        last_tick_at = started_at
+        last_command_mps = 0.0
+        commanded_distance = 0.0
+        measured_distance = 0.0
+        while True:
             now = time.monotonic()
+            tick_s = max(0.0, now - last_tick_at)
+            commanded_distance += last_command_mps * tick_s
+            last_tick_at = now
+            if now >= deadline:
+                break
             async with self._state_lock:
                 camera_fresh = bool(
                     self._last_frame_at is not None
@@ -3307,64 +3456,22 @@ class CollieRuntime:
                 )
             if not camera_fresh:
                 raise RuntimeCommandError(
-                    "camera became stale during final approach"
+                    "camera became stale during final push"
                 )
             sample = self.heading_provider.status()
             if not sample.pose_healthy:
                 raise RuntimeCommandError(
-                    "Go2 local pose became stale during final approach"
+                    "Go2 local pose became stale during final push"
                 )
             assert sample.x_m is not None and sample.y_m is not None
             measured_distance = math.hypot(
                 sample.x_m - start_x,
                 sample.y_m - start_y,
             )
-            if measured_distance >= target_distance:
-                await self.navigation_command(0.0, 0.0)
-                elapsed = now - started_at
-                async with self._state_lock:
-                    self._mission.final_approach_status = "complete"
-                    self._mission.final_approach_elapsed_s = elapsed
-                    self._mission.final_approach_commanded_distance_m = (
-                        commanded_distance
-                    )
-                    self._mission.final_approach_measured_distance_m = (
-                        measured_distance
-                    )
-                print(
-                    "final_approach event=complete "
-                    f"elapsed_s={elapsed:.3f} "
-                    f"commanded_distance_m={commanded_distance:.3f} "
-                    f"measured_distance_m={measured_distance:.3f}",
-                    flush=True,
-                )
-                return "measured_final_approach_complete"
-            if (
-                measured_distance
-                >= best_distance
-                + self.mission_config.final_approach_stall_min_progress_m
-            ):
-                best_distance = measured_distance
-                last_progress_at = now
-            elif (
-                now - last_progress_at
-                >= self.mission_config.final_approach_stall_timeout_s
-            ):
-                return await self._complete_partial_final_approach(
-                    reason="stall",
-                    started_at=started_at,
-                    commanded_distance=commanded_distance,
-                    measured_distance=measured_distance,
-                )
-            remaining = target_distance - measured_distance
-            command_mps = min(
-                self.mission_config.final_approach_mps,
-                max(0.04, remaining * 1.2),
+            command_status = await self._send_final_push()
+            last_command_mps = float(
+                command_status["command"]["forward_mps"]  # type: ignore[index]
             )
-            await self.navigation_command(command_mps, 0.0)
-            tick_s = max(0.0, now - last_tick_at)
-            commanded_distance += command_mps * tick_s
-            last_tick_at = now
             async with self._state_lock:
                 self._mission.final_approach_elapsed_s = now - started_at
                 self._mission.final_approach_commanded_distance_m = (
@@ -3373,47 +3480,24 @@ class CollieRuntime:
                 self._mission.final_approach_measured_distance_m = (
                     measured_distance
                 )
-            await asyncio.sleep(0.05)
-        return await self._complete_partial_final_approach(
-            reason="timeout",
-            started_at=started_at,
-            commanded_distance=commanded_distance,
-            measured_distance=best_distance,
-        )
-
-    async def _complete_partial_final_approach(
-        self,
-        *,
-        reason: str,
-        started_at: float,
-        commanded_distance: float,
-        measured_distance: float,
-    ) -> str:
-        """Stop a blocked edge-confirmed approach and continue to StandDown."""
-
+            await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
         await self.navigation_command(0.0, 0.0)
         elapsed = time.monotonic() - started_at
         async with self._state_lock:
-            self._mission.reason = (
-                f"partial_final_approach_{reason}_continuing_to_standdown"
-            )
-            self._mission.final_approach_status = "partial"
+            self._mission.reason = "final_push_complete_continuing_to_standdown"
+            self._mission.final_approach_status = "complete"
             self._mission.final_approach_elapsed_s = elapsed
-            self._mission.final_approach_commanded_distance_m = (
-                commanded_distance
-            )
-            self._mission.final_approach_measured_distance_m = (
-                measured_distance
-            )
+            self._mission.final_approach_commanded_distance_m = commanded_distance
+            self._mission.final_approach_measured_distance_m = measured_distance
         print(
-            "final_approach event=partial "
-            f"reason={reason} elapsed_s={elapsed:.3f} "
+            "final_push event=complete "
+            f"elapsed_s={elapsed:.3f} "
             f"commanded_distance_m={commanded_distance:.3f} "
             f"measured_distance_m={measured_distance:.3f} "
             "next=standdown",
             flush=True,
         )
-        return f"measured_final_approach_partial_{reason}"
+        return "offscreen_final_push_complete"
 
     async def _return_home(self) -> None:
         """Return to the captured start pose using fresh local odometry.

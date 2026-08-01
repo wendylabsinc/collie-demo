@@ -1,0 +1,37 @@
+{
+  "test_id": "CAM-RECONNECT-001",
+  "status": "completed_failed",
+  "mode": "forced_voice_service_loss_while_idle",
+  "motion_commands_sent": false,
+  "baseline_generation": "b0f1c8deb612463bafff944f0212cd8f.6",
+  "recovery_generations": [
+    "734e069eb99d4525abc63d6cf0e8a3ae.1",
+    "734e069eb99d4525abc63d6cf0e8a3ae.2"
+  ],
+  "timeline_elapsed_s": {
+    "first_voice_endpoint_failure": 4.685,
+    "first_replacement_generation": 8.715,
+    "second_replacement_generation": 25.23,
+    "fresh_broker_frames": 27.713,
+    "main_runtime_synchronized": 50.256,
+    "detector_ready": 56.96
+  },
+  "recovery_from_first_failure_s": {
+    "fresh_broker_frames": 23.028,
+    "main_runtime_synchronized": 45.571,
+    "detector_ready": 52.275
+  },
+  "safety": {
+    "mission_active": false,
+    "motion_armed": false,
+    "motion_owner": null
+  },
+  "human_verification": {
+    "bark_request_status": "bark_played",
+    "bark_audible": true,
+    "microphone_quality_usable": false,
+    "safe_test_phrase_appeared": false,
+    "operator_note": "Microphone is too bad; a new microphone is required to test."
+  },
+  "conclusion": "Fail: recovery was fail-safe but not bounded or clean, and the installed microphone is not usable for speech verification."
+}

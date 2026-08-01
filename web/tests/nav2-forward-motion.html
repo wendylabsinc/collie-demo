@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Woof Nav2 Forward Calibration</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#111318;color:#f5f6f8;font:16px system-ui,sans-serif}main{max-width:560px;margin:32px auto;padding:20px}.card{border:1px solid #4b505c;border-radius:16px;padding:20px;background:#191c23}h1{margin:0 0 8px;font-size:24px}p{color:#c6c9d0}.warning{padding:12px;border:1px solid #e14d4d;border-radius:10px;color:#ffb5b5;font-weight:800}.row{display:grid;grid-template-columns:120px 1fr;gap:12px;align-items:center;margin:16px 0}output,input,button{font:inherit}input[type=number]{width:100%;padding:12px;border-radius:10px;border:1px solid #626978;background:#0d0f13;color:#fff}button{width:100%;padding:14px;border:0;border-radius:10px;font-weight:800;cursor:pointer}.pulse{background:#efb34c;color:#191207}.stop{margin-top:10px;background:#d94343;color:#fff}.answer{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.yes{background:#39b978}.no{background:#718078;color:#fff}button:disabled{opacity:.4;cursor:not-allowed}.check{display:flex;gap:10px;align-items:flex-start;margin:18px 0}.status{min-height:48px;color:#f3cb78}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{text-align:left;padding:8px;border-bottom:1px solid #383d48}.lowest{font-size:18px;color:#74dfa8;font-weight:800}.back{display:inline-block;margin-top:16px;color:#aeb8ff}
+</style>
+<main>
+  <div class="card">
+    <h1>Nav2 direct forward deadband</h1>
+    <p>One 0.4 second pulse through direct SportClient. Repeat the exact same amount to distinguish posture settling from an actual step.</p>
+    <div class="warning">NO FACTORY OBSTACLE AVOIDANCE · NO APP SPEED CLAMP — the exact non-negative amount is sent. Keep the lane clear and hold STOP ready.</div>
+    <div class="row"><strong>Direction</strong><output>forward</output></div>
+    <div class="row"><label for="amount"><strong>Requested</strong></label><div><input id="amount" type="number" step="any" value="0.05"> <small>m/s</small></div></div>
+    <button id="pulse" class="pulse">NAV2 DIRECT PULSE</button>
+    <button id="stop" class="stop">STOP</button>
+    <div id="status" class="status">Idle and stopped.</div>
+    <div class="answer">
+      <button id="yes" class="yes">STEP TAKEN? YES</button>
+      <button id="no" class="no">NO — POSTURE ONLY</button>
+    </div>
+    <p id="lowest" class="lowest">Lowest amount with a step: —</p>
+    <table>
+      <thead><tr><th>Pulse</th><th>Amount sent</th><th>Step?</th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+  </div>
+  <a class="back" href="/tests">Back to mini tests</a>
+</main>
+<script>
+const amount=document.querySelector('#amount'),pulse=document.querySelector('#pulse'),stop=document.querySelector('#stop'),yes=document.querySelector('#yes'),no=document.querySelector('#no'),statusLine=document.querySelector('#status'),results=document.querySelector('#results'),lowest=document.querySelector('#lowest');
+let running=false,pending=null,answers=[],pulseCount=0;
+function validAmount(){const n=Number(amount.value);return Number.isFinite(n)&&n>=0}
+function render(){pulse.disabled=running||!validAmount();pulse.textContent=running?'PULSING…':'NAV2 DIRECT PULSE';amount.disabled=running;results.innerHTML=answers.map(x=>`<tr><td>${String(x.pulse)}</td><td>${String(x.sent)} m/s</td><td>${x.stepped?'YES':'POSTURE ONLY'}</td></tr>`).join('');const stepValues=answers.filter(x=>x.stepped).map(x=>x.sent);lowest.textContent=`Lowest amount with a step: ${stepValues.length?String(Math.min(...stepValues))+' m/s':'—'}`}
+async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Request failed');return data}
+pulse.onclick=async()=>{running=true;pending=null;statusLine.textContent='Pulsing exact amount through direct motion…';render();try{const requested=Number(amount.value);const result=await api('/api/calibration/nav2-forward-pulse',{amount_mps:requested,confirmation:'PATH CLEAR NO AVOIDANCE STOP READY'});if(!result.stopped)throw new Error('STOP was not confirmed');pulseCount+=1;pending={pulse:pulseCount,sent:result.amount_mps};statusLine.textContent=`Stopped. Sent exactly ${String(result.amount_mps)} m/s. Did Woof take a step, beyond posture settling?`}catch(error){statusLine.textContent=`Stopped: ${error.message}`;await api('/api/stop').catch(()=>{})}finally{running=false;render()}};
+stop.onclick=async()=>{statusLine.textContent='Stopping…';await api('/api/stop').catch(()=>{});running=false;pending=null;statusLine.textContent='STOPPED';render()};
+function answer(stepped){if(pending===null){statusLine.textContent='Run a pulse first; these result buttons stay available.';return}answers.unshift({...pending,stepped});pending=null;statusLine.textContent='Result saved. Repeat the same amount or enter any other non-negative amount.';render()}
+yes.onclick=()=>answer(true);no.onclick=()=>answer(false);amount.oninput=render;addEventListener('pagehide',()=>navigator.sendBeacon('/api/stop'));render();
+</script>
+</html>

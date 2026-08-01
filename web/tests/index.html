@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Woof Mini Tests</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,system-ui;background:#0a1110;color:#f2fbf7}body{max-width:880px;margin:auto;padding:28px}h1{margin-bottom:.2em}.muted{color:#9db1a8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:28px 0}.test{display:block;border:1px solid #38564a;border-radius:16px;padding:20px;background:#101d18;color:inherit;text-decoration:none}.test:hover{border-color:#63c99a}.tag{color:#74dda9;font-size:.76rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.test h2{font-size:1.15rem;margin:.5em 0}.test p{color:#aebfb7;margin:0}.back{color:#8fd8b6}
+  </style>
+</head>
+<body>
+  <div class="tag">Reusable operator tools</div>
+  <h1>Woof mini tests</h1>
+  <p class="muted">Small, isolated UIs for testing one subsystem at a time. Motion tests keep their original safety confirmations and automatic stop behavior.</p>
+  <div class="grid">
+    <a class="test" href="/tests/forward-motion"><div class="tag">Factory avoidance</div><h2>Forward motion deadband</h2><p>Send one bounded forward pulse and record whether physical movement occurred.</p></a>
+    <a class="test" href="/tests/nav2-forward-motion"><div class="tag">Direct SportClient</div><h2>Nav2 forward motion</h2><p>Test the exact non-negative command amount and distinguish a step from posture settling.</p></a>
+    <a class="test" href="/tests/fruit-detector"><div class="tag">Read only</div><h2>Fruit detector</h2><p>Inspect camera frames, detections, confidence, and inference timing without commanding motion.</p></a>
+  </div>
+  <a class="back" href="/">Back to demo</a> · <a class="back" href="/debug">Open debug console</a>
+</body>
+</html>

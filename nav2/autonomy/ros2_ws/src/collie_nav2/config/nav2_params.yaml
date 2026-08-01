@@ -25,12 +25,14 @@ controller_server:
     goal_checker_plugins: ["goal_checker"]
     controller_plugins: ["FollowPath"]
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
+      # Return paths often begin with an in-place alignment turn. Count that
+      # rotation as real progress instead of waiting only for translation.
+      plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.04
-      # A forward-only quadruped may need an in-place path-alignment turn
-      # before translating around an obstacle. The gateway separately fails
-      # zero pose progress after 6 s and caps rotation-only time at 12 s.
-      movement_time_allowance: 12.0
+      required_movement_angle: 0.0523599
+      # Fail this controller attempt early enough for the behavior tree to
+      # clear costmaps/recover before the gateway's outer 8 s stall guard.
+      movement_time_allowance: 5.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       # Finish inside the gateway's external 0.10 m / 5 degree contract.
@@ -46,7 +48,9 @@ controller_server:
       lookahead_time: 1.5
       rotate_to_heading_angular_vel: 0.40
       transform_tolerance: 0.25
-      min_approach_linear_velocity: 0.05
+      # NAV2-DEADBAND-001 direct-path measurement: lower positive commands can
+      # settle posture without producing a step on the physical Go2.
+      min_approach_linear_velocity: 0.25
       approach_velocity_scaling_dist: 0.60
       use_velocity_scaled_lookahead_dist: true
       use_collision_detection: true
@@ -54,7 +58,7 @@ controller_server:
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 0.90
-      regulated_linear_scaling_min_speed: 0.05
+      regulated_linear_scaling_min_speed: 0.25
       use_rotate_to_heading: true
       rotate_to_heading_min_angle: 0.35
       max_angular_accel: 0.8

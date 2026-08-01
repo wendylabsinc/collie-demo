@@ -9,14 +9,17 @@ from contextlib import asynccontextmanager
 import inspect
 import json
 import logging
+import math
 import os
 import queue
+import struct
 import threading
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+import wave
 
 import cv2
 from fastapi import FastAPI, HTTPException, WebSocket as FastAPIWebSocket
@@ -48,6 +51,10 @@ AUTO_START = os.environ.get("COLLIE_VOICE_AUTO_START", "1").strip().lower() in {
 BARK_UUID = os.environ.get(
     "COLLIE_BARK_UUID", "161387de-21ab-4f0b-b4e9-97124b000d06"
 ).strip()
+THERMAL_BEEP_NAME = "woof_thermal_warning_beep"
+THERMAL_BEEP_PATH = "/tmp/woof_thermal_warning_beep.wav"
+LOW_BATTERY_NAME = "woof_low_battery"
+LOW_BATTERY_PATH = "/opt/collie-audio/woof_low_battery.wav"
 STATE_ENV_PATH = os.environ.get(
     "COLLIE_VOICE_ENV_FILE", "/state/elevenlabs.env"
 )
@@ -238,6 +245,10 @@ if AUTO_START:
 command_lock = threading.Lock()
 webrtc_loop_ref: asyncio.AbstractEventLoop | None = None
 audiohub_ref: Any = None
+thermal_beep_uuid: str | None = None
+thermal_beep_lock = threading.Lock()
+low_battery_uuid: str | None = None
+low_battery_lock = threading.Lock()
 active_scribe_ws: Any = None
 active_scribe_ws_lock = threading.Lock()
 last_command_key = ""
@@ -376,6 +387,159 @@ def _play_bark() -> None:
         _play_bark_async(), webrtc_loop_ref
     )
     future.result(timeout=4.0)
+
+
+def _audiohub_entries(response: Any) -> list[dict[str, Any]]:
+    """Normalize AudioHub's nested JSON response into audio records."""
+
+    if not isinstance(response, dict):
+        return []
+    payload: Any = response.get("data", response)
+    if isinstance(payload, dict):
+        payload = payload.get("data", payload)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, dict):
+        return []
+    records = payload.get("audio_list", [])
+    return [record for record in records if isinstance(record, dict)]
+
+
+def _named_audio_id(
+    records: list[dict[str, Any]], custom_name: str
+) -> str | None:
+    for record in records:
+        if str(record.get("CUSTOM_NAME") or "") != custom_name:
+            continue
+        unique_id = str(record.get("UNIQUE_ID") or "").strip()
+        if unique_id:
+            return unique_id
+    return None
+
+
+def _thermal_beep_id(records: list[dict[str, Any]]) -> str | None:
+    return _named_audio_id(records, THERMAL_BEEP_NAME)
+
+
+def _write_thermal_beep(path: str = THERMAL_BEEP_PATH) -> None:
+    """Create three short 880 Hz pulses without adding a binary asset."""
+
+    sample_rate = 44_100
+    amplitude = 13_000
+    frames = bytearray()
+    segments = ((0.16, True), (0.09, False)) * 2 + ((0.16, True),)
+    phase = 0
+    for duration_s, tone_on in segments:
+        count = int(sample_rate * duration_s)
+        for _ in range(count):
+            value = (
+                int(amplitude * math.sin(2.0 * math.pi * 880.0 * phase / sample_rate))
+                if tone_on
+                else 0
+            )
+            frames.extend(struct.pack("<h", value))
+            phase += 1
+    with wave.open(path, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate)
+        stream.writeframes(bytes(frames))
+
+
+async def _ensure_thermal_beep_async() -> str:
+    global thermal_beep_uuid
+
+    if audiohub_ref is None:
+        raise RuntimeError("Go2 AudioHub is not connected")
+    if thermal_beep_uuid:
+        return thermal_beep_uuid
+
+    response = await audiohub_ref.get_audio_list()
+    unique_id = _thermal_beep_id(_audiohub_entries(response))
+    if unique_id is None:
+        _write_thermal_beep(THERMAL_BEEP_PATH)
+        await audiohub_ref.upload_audio_file(THERMAL_BEEP_PATH)
+        for _ in range(5):
+            response = await audiohub_ref.get_audio_list()
+            unique_id = _thermal_beep_id(_audiohub_entries(response))
+            if unique_id:
+                break
+            await asyncio.sleep(0.2)
+    if unique_id is None:
+        raise RuntimeError("thermal warning beep was not registered by AudioHub")
+    thermal_beep_uuid = unique_id
+    return unique_id
+
+
+async def _play_thermal_beep_async() -> str:
+    unique_id = await _ensure_thermal_beep_async()
+    if audiohub_ref is None:
+        raise RuntimeError("Go2 AudioHub disconnected before thermal beep")
+    await audiohub_ref.play_by_uuid(unique_id)
+    return unique_id
+
+
+def _play_thermal_beep() -> str:
+    if webrtc_loop_ref is None:
+        raise RuntimeError("Go2 WebRTC loop is not connected")
+    with thermal_beep_lock:
+        future = asyncio.run_coroutine_threadsafe(
+            _play_thermal_beep_async(), webrtc_loop_ref
+        )
+        return str(future.result(timeout=12.0))
+
+
+async def _ensure_low_battery_audio_async() -> str:
+    global low_battery_uuid
+
+    if audiohub_ref is None:
+        raise RuntimeError("Go2 AudioHub is not connected")
+    if low_battery_uuid:
+        return low_battery_uuid
+    if not os.path.isfile(LOW_BATTERY_PATH):
+        raise RuntimeError("low-battery announcement asset is unavailable")
+
+    response = await audiohub_ref.get_audio_list()
+    unique_id = _named_audio_id(_audiohub_entries(response), LOW_BATTERY_NAME)
+    if unique_id is None:
+        await audiohub_ref.upload_audio_file(LOW_BATTERY_PATH)
+        for _ in range(5):
+            response = await audiohub_ref.get_audio_list()
+            unique_id = _named_audio_id(
+                _audiohub_entries(response), LOW_BATTERY_NAME
+            )
+            if unique_id:
+                break
+            await asyncio.sleep(0.2)
+    if unique_id is None:
+        raise RuntimeError(
+            "low-battery announcement was not registered by AudioHub"
+        )
+    low_battery_uuid = unique_id
+    return unique_id
+
+
+async def _play_low_battery_async() -> str:
+    unique_id = await _ensure_low_battery_audio_async()
+    if audiohub_ref is None:
+        raise RuntimeError(
+            "Go2 AudioHub disconnected before low-battery announcement"
+        )
+    await audiohub_ref.play_by_uuid(unique_id)
+    return unique_id
+
+
+def _play_low_battery() -> str:
+    if webrtc_loop_ref is None:
+        raise RuntimeError("Go2 WebRTC loop is not connected")
+    with low_battery_lock:
+        future = asyncio.run_coroutine_threadsafe(
+            _play_low_battery_async(), webrtc_loop_ref
+        )
+        return str(future.result(timeout=12.0))
 
 
 def _announce_on_stage(event: str, target: str | None = None) -> None:
@@ -1192,6 +1356,43 @@ def bark() -> JSONResponse:
         )
     state.update(last_event="bark_played", last_error="")
     return JSONResponse({"ok": True, "uuid": BARK_UUID})
+
+
+@app.post("/api/thermal/beep")
+def thermal_beep() -> JSONResponse:
+    """Play the audible over-temperature alarm without issuing motor commands."""
+
+    try:
+        unique_id = _play_thermal_beep()
+    except Exception as exc:
+        state.update(last_event="thermal_beep_failed", last_error=str(exc))
+        return JSONResponse(
+            {"ok": False, "error": str(exc)}, status_code=503
+        )
+    state.update(last_event="thermal_beep_played", last_error="")
+    return JSONResponse({"ok": True, "uuid": unique_id})
+
+
+@app.post("/api/battery/low")
+def low_battery() -> JSONResponse:
+    """Speak the low-battery warning without issuing motor commands."""
+
+    try:
+        unique_id = _play_low_battery()
+    except Exception as exc:
+        state.update(
+            last_event="low_battery_announcement_failed",
+            last_error=str(exc),
+        )
+        return JSONResponse(
+            {"ok": False, "error": str(exc)}, status_code=503
+        )
+    state.update(
+        last_event="low_battery_announced",
+        last_error="",
+        last_spoken="Low battery",
+    )
+    return JSONResponse({"ok": True, "uuid": unique_id})
 
 
 if __name__ == "__main__":

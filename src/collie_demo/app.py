@@ -31,9 +31,16 @@ class NavigationCommandRequest(BaseModel):
     yaw_rps: float
 
 
-class FinalApproachCalibrationRequest(BaseModel):
+class ForwardCalibrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    distance_m: float
+    amount_mps: float
+    confirmation: str
+
+
+class Nav2ForwardCalibrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    amount_mps: float
+    confirmation: str
 
 
 class VoiceEventRequest(BaseModel):
@@ -65,6 +72,34 @@ def create_app(runtime: CollieRuntime, web_directory: Path) -> FastAPI:
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(web_directory / "index.html")
+
+    @app.get("/debug")
+    def debug_page() -> FileResponse:
+        return FileResponse(web_directory / "debug.html")
+
+    @app.get("/tests")
+    def mini_tests_page() -> FileResponse:
+        return FileResponse(web_directory / "tests" / "index.html")
+
+    @app.get("/tests/forward-motion")
+    def forward_motion_test_page() -> FileResponse:
+        return FileResponse(web_directory / "tests" / "forward-motion.html")
+
+    @app.get("/tests/nav2-forward-motion")
+    def nav2_forward_motion_test_page() -> FileResponse:
+        return FileResponse(web_directory / "tests" / "nav2-forward-motion.html")
+
+    @app.get("/tests/fruit-detector")
+    def fruit_detector_test_page() -> FileResponse:
+        return FileResponse(web_directory / "tests" / "fruit-detector.html")
+
+    @app.get("/forward-calibration")
+    def forward_calibration_page() -> FileResponse:
+        return FileResponse(web_directory / "tests" / "forward-motion.html")
+
+    @app.get("/nav2-forward-calibration")
+    def nav2_forward_calibration_page() -> FileResponse:
+        return FileResponse(web_directory / "tests" / "nav2-forward-motion.html")
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:
@@ -197,12 +232,27 @@ def create_app(runtime: CollieRuntime, web_directory: Path) -> FastAPI:
         except RuntimeCommandError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/final-approach")
-    async def calibrate_final_approach(
-        request: FinalApproachCalibrationRequest,
+    @app.post("/api/calibration/forward-pulse")
+    async def calibrate_forward_deadband(
+        request: ForwardCalibrationRequest,
     ) -> dict[str, object]:
         try:
-            return await runtime.set_final_approach_distance(request.distance_m)
+            return await runtime.run_forward_calibration(
+                request.amount_mps,
+                request.confirmation,
+            )
+        except RuntimeCommandError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/nav2-forward-pulse")
+    async def calibrate_nav2_forward_deadband(
+        request: Nav2ForwardCalibrationRequest,
+    ) -> dict[str, object]:
+        try:
+            return await runtime.run_nav2_forward_calibration(
+                request.amount_mps,
+                request.confirmation,
+            )
         except RuntimeCommandError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

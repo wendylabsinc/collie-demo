@@ -1,0 +1,34 @@
+{
+  "test_id": "CAM-IP-001",
+  "status": "completed_failed",
+  "mode": "read_only",
+  "target": {
+    "main_status_url": "http://192.168.0.107:8096/api/status",
+    "camera_status_url": "http://192.168.0.107:8098/api/camera/status"
+  },
+  "duration_s": 120.614,
+  "samples": 240,
+  "healthy_samples": 239,
+  "failed_samples": 1,
+  "failure_counts": {
+    "main_status_request_ms_slow": 1
+  },
+  "generation_changes": 0,
+  "failure_sample": {
+    "elapsed_s": 91.2,
+    "main_status_request_ms": 1176.982,
+    "camera_status_request_ms": 265.193
+  },
+  "freshness_maximum_s": {
+    "broker_frame": 0.107,
+    "runtime_frame": 0.187,
+    "detector": 0.17
+  },
+  "request_ms": {
+    "main_mean": 166.5251,
+    "main_maximum": 1176.982,
+    "camera_mean": 142.9322,
+    "camera_maximum": 632.336
+  },
+  "conclusion": "Direct IP did not eliminate intermittent status latency; camera and detector telemetry remained fresh. A follow-up phase-timing test is required to distinguish main-runtime latency from shared transport or host latency."
+}

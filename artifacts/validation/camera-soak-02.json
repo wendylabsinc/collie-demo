@@ -1,0 +1,51 @@
+{
+  "test_id": "CAM-SOAK-002",
+  "status": "completed_passed",
+  "mode": "read_only_direct_ip",
+  "motion_commands_sent": false,
+  "duration_s": 1799.507,
+  "samples": 3600,
+  "healthy_samples": 3600,
+  "failed_samples": 0,
+  "failure_counts": {},
+  "generation_changes": 0,
+  "generation": "734e069eb99d4525abc63d6cf0e8a3ae.2",
+  "metrics": {
+    "broker_fps": {
+      "minimum": 13.4,
+      "mean": 14.2981,
+      "maximum": 15.3
+    },
+    "runtime_fps": {
+      "minimum": 9.1,
+      "mean": 9.8661,
+      "maximum": 10.4
+    },
+    "broker_frame_age_s": {
+      "mean": 0.039,
+      "maximum": 0.199
+    },
+    "runtime_frame_age_s": {
+      "mean": 0.09,
+      "maximum": 0.238
+    },
+    "detector_age_s": {
+      "mean": 0.0495,
+      "maximum": 0.433
+    },
+    "inference_ms": {
+      "minimum": 69.2,
+      "mean": 103.2194,
+      "maximum": 411.7
+    },
+    "main_status_request_ms": {
+      "mean": 31.4967,
+      "maximum": 402.617
+    },
+    "camera_status_request_ms": {
+      "mean": 26.2539,
+      "maximum": 554.617
+    }
+  },
+  "conclusion": "Pass: the camera, broker, main runtime, and detector remained continuously fresh for the full 30-minute acceptance run."
+}

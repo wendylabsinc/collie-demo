@@ -85,11 +85,8 @@ class MissionConfig:
     near_bbox_height_ratio: float = 0.15
     near_confirmations_required: int = 3
     near_loss_grace_s: float = 0.75
-    final_approach_distance_m: float = 0.10
-    final_approach_mps: float = 0.10
-    final_approach_timeout_s: float = 3.0
-    final_approach_stall_timeout_s: float = 1.0
-    final_approach_stall_min_progress_m: float = 0.001
+    final_push_mps: float = 1.0
+    final_push_duration_s: float = 0.40
 
     def __post_init__(self) -> None:
         if self.capture_timeout_s <= 0.0:
@@ -146,11 +143,8 @@ class MissionConfig:
             "return_max_odometry_step_m",
             "return_max_odometry_yaw_step_rad",
             "near_loss_grace_s",
-            "final_approach_distance_m",
-            "final_approach_mps",
-            "final_approach_timeout_s",
-            "final_approach_stall_timeout_s",
-            "final_approach_stall_min_progress_m",
+            "final_push_mps",
+            "final_push_duration_s",
             "arrival_pointing_timeout_s",
         ):
             value = getattr(self, name)
@@ -171,8 +165,6 @@ class MissionConfig:
             or self.arrival_rest_duration_s <= 0.0
         ):
             raise ValueError("arrival_rest_duration_s must be positive")
-        if self.final_approach_distance_m > 0.30:
-            raise ValueError("final_approach_distance_m cannot exceed 0.30 m")
         if self.arrival_pointing_label.strip().lower() not in {
             "all",
             "apple",

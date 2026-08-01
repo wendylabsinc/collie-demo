@@ -221,20 +221,11 @@ def build_runtime() -> CollieRuntime:
         near_loss_grace_s=float(
             os.environ.get("COLLIE_NEAR_LOSS_GRACE_S", "0.75")
         ),
-        final_approach_distance_m=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_DISTANCE_M", "0.10")
+        final_push_mps=float(
+            os.environ.get("COLLIE_FINAL_PUSH_MPS", "1.0")
         ),
-        final_approach_mps=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_MPS", "0.10")
-        ),
-        final_approach_timeout_s=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_TIMEOUT_S", "3.0")
-        ),
-        final_approach_stall_timeout_s=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_STALL_TIMEOUT_S", "1.0")
-        ),
-        final_approach_stall_min_progress_m=float(
-            os.environ.get("COLLIE_FINAL_APPROACH_STALL_MIN_PROGRESS_M", "0.001")
+        final_push_duration_s=float(
+            os.environ.get("COLLIE_FINAL_PUSH_DURATION_S", "0.40")
         ),
     )
     controller_config = ApproachConfig(
@@ -251,8 +242,8 @@ def build_runtime() -> CollieRuntime:
                 maximum_forward_mps=max(
                     controller_config.forward_mps,
                     mission_config.return_forward_mps,
-                    mission_config.final_approach_mps,
                 ),
+                maximum_final_push_mps=mission_config.final_push_mps,
                 maximum_yaw_rps=max(
                     controller_config.maximum_yaw_rps,
                     mission_config.turn_rate_rps,

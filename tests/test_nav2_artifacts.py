@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -34,7 +35,10 @@ def test_nav2_internal_goal_margin_is_stricter_than_external_contract() -> None:
     ).read_text()
 
     assert "default_server_timeout: 2000" in params
-    assert "movement_time_allowance: 12.0" in params
+    assert 'plugin: "nav2_controller::PoseProgressChecker"' in params
+    assert "required_movement_radius: 0.04" in params
+    assert "required_movement_angle: 0.0523599" in params
+    assert "movement_time_allowance: 5.0" in params
     assert "xy_goal_tolerance: 0.08" in params
     assert "yaw_goal_tolerance: 0.0698132" in params
     assert "RegulatedPurePursuitController" in params
@@ -60,6 +64,35 @@ def test_nav2_gateway_requires_active_lifecycle_and_tracks_heading_progress() ->
     assert "_last_linear_progress_pose" in gateway
     assert "Only map-frame pose" in gateway
     assert "Nav2 command exceeded the guarded stage envelope" in gateway
+
+
+def test_gateway_stall_guard_leaves_time_for_nav2_recovery() -> None:
+    params = (
+        NAV2
+        / "ros2_ws"
+        / "src"
+        / "collie_nav2"
+        / "config"
+        / "nav2_params.yaml"
+    ).read_text()
+    gateway = (
+        NAV2
+        / "ros2_ws"
+        / "src"
+        / "collie_nav2"
+        / "collie_nav2"
+        / "gateway.py"
+    ).read_text()
+
+    movement_allowance = float(
+        re.search(r"movement_time_allowance:\s*([0-9.]+)", params).group(1)
+    )
+    gateway_stall_timeout = float(
+        re.search(r"STALL_TIMEOUT_S\s*=\s*([0-9.]+)", gateway).group(1)
+    )
+
+    assert gateway_stall_timeout > movement_allowance
+    assert gateway_stall_timeout - movement_allowance >= 2.0
 
 
 def test_rtabmap_uses_filtered_hesai_scan_instead_of_raw_self_returns() -> None:
@@ -200,9 +233,62 @@ def test_gateway_applies_a_minimum_only_to_fresh_rotation_commands() -> None:
         / "collie_nav2"
         / "gateway.py"
     ).read_text()
+    shaping = (
+        NAV2
+        / "ros2_ws"
+        / "src"
+        / "collie_nav2"
+        / "collie_nav2"
+        / "command_shaping.py"
+    ).read_text()
     assert "MIN_ROTATION_YAW_RPS = 0.35" in gateway
-    assert "abs(forward) <= 0.02" in gateway
-    assert "math.copysign(self.MIN_ROTATION_YAW_RPS, yaw)" in gateway
+    assert "abs(forward) <= 0.02" in shaping
+    assert "math.copysign(minimum_rotation_yaw_rps, yaw)" in shaping
+
+
+def test_nav2_uses_measured_direct_forward_command_floor() -> None:
+    gateway = (
+        NAV2
+        / "ros2_ws"
+        / "src"
+        / "collie_nav2"
+        / "collie_nav2"
+        / "gateway.py"
+    ).read_text()
+    params = (
+        NAV2
+        / "ros2_ws"
+        / "src"
+        / "collie_nav2"
+        / "config"
+        / "nav2_params.yaml"
+    ).read_text()
+
+    assert "MIN_FORWARD_MPS = 0.25" in gateway
+    assert "apply_measured_motion_floors(" in gateway
+    assert "min_approach_linear_velocity: 0.25" in params
+    assert "regulated_linear_scaling_min_speed: 0.25" in params
+
+
+def test_gateway_retains_path_and_command_diagnostics_after_failure() -> None:
+    gateway = (
+        NAV2
+        / "ros2_ws"
+        / "src"
+        / "collie_nav2"
+        / "collie_nav2"
+        / "gateway.py"
+    ).read_text()
+
+    assert 'Path, "/plan"' in gateway
+    assert '"global_plan": plan' in gateway
+    assert '"raw_cmd_vel"' in gateway
+    assert '"last_relay"' in gateway
+    assert '"boosted_forward_attempts"' in gateway
+    assert '"stale_zero_attempts"' in gateway
+    assert '"progress_age_s"' in gateway
+    assert '"linear_progress_age_s"' in gateway
+    assert 'deque(maxlen=80)' in gateway
 
 
 def test_synthetic_trial_can_disable_only_the_mapping_process() -> None:

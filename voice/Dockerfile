@@ -8,7 +8,7 @@ ARG CYCLONEDDS_VERSION=0.10.5
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git ca-certificates pkg-config \
       gcc python3-dev portaudio19-dev libportaudio2 \
-      libsrtp2-1 libffi-dev libssl-dev \
+      libsrtp2-1 libffi-dev libssl-dev espeak-ng \
     && git clone --depth 1 --branch ${CYCLONEDDS_VERSION} \
       https://github.com/eclipse-cyclonedds/cyclonedds.git /tmp/cyclonedds \
     && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build \
@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && cmake --install /tmp/cyclonedds/build \
     && ldconfig \
     && rm -rf /tmp/cyclonedds /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/collie-audio \
+    && espeak-ng -s 145 -w /opt/collie-audio/woof_low_battery.wav \
+      "Low battery"
 
 ENV CYCLONEDDS_HOME=/usr/local \
     PYTHONUNBUFFERED=1 \

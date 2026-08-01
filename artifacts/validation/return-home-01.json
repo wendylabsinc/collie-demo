@@ -1,0 +1,64 @@
+{
+  "test_id": "RETURN-HOME-001",
+  "completed_at": "2026-07-31T23:50:17Z",
+  "status": "completed_failed",
+  "mode": "guarded_full_sequence_typed_pear",
+  "operator_ready_confirmed": true,
+  "target": "pear",
+  "return_backend": "nav2",
+  "duration_s": 61.849,
+  "phase_timeline_s": {
+    "turning": 0,
+    "confirming": 5,
+    "approaching": 6,
+    "celebrating": 8,
+    "returning_home": 16,
+    "aborted": 62
+  },
+  "outbound": {
+    "turn_progress_deg": 173.8,
+    "fruit_lock_confirmations": 2,
+    "fruit_lock_failures": 0,
+    "arrival_rest_status": "complete"
+  },
+  "home_capture": {
+    "pose": {
+      "x_m": 0.0118,
+      "y_m": 0.0046,
+      "yaw_rad": 1.7927,
+      "frame_id": "map"
+    },
+    "map_sample_count": 10,
+    "maximum_position_span_m": 0.0002,
+    "maximum_yaw_span_deg": 0.07,
+    "local_odometry_sample_count": 11,
+    "local_odometry_maximum_position_span_m": 0.0001,
+    "local_odometry_maximum_yaw_span_deg": 0.05
+  },
+  "return": {
+    "configured_timeout_s": 45.0,
+    "nav2_navigation_time_s": 37.762,
+    "status": "failed",
+    "reason": "Nav2 return home timed out",
+    "distance_remaining_m": 0.2068,
+    "measured_progress_m": 0.166,
+    "heading_error_deg": null,
+    "recoveries": 1,
+    "prealignment_status": "prealigned_for_nav2",
+    "localization_healthy": true,
+    "map_healthy": true,
+    "scan_healthy": true
+  },
+  "safety_after_stop": {
+    "mission_active": false,
+    "main_motion_armed": false,
+    "main_motion_owner": null,
+    "gateway_motion_armed": false,
+    "gateway_motion_owner": null,
+    "forward_mps": 0.0,
+    "yaw_rps": 0.0,
+    "motion_fault": null
+  },
+  "snapshot": "return-home-01.jpg",
+  "conclusion": "Fail: the guarded sequence reached and approached the pear, completed the arrival rest, and made measurable Nav2 return progress, but timed out 0.207 m from Home before the 0.10 m position and 5 degree heading gates could be verified. The failure stopped and disarmed safely."
+}
