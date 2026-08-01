@@ -2,7 +2,8 @@
 
 See [`docs/repository-map.md`](docs/repository-map.md) for the intended Border
 Collie routine, the code path for each step, current deployment gaps, and the
-cleanup/verification plan.
+cleanup/verification plan. Completed hardware tests and their visual evidence
+are tracked in [`docs/validation-results.md`](docs/validation-results.md).
 
 A self-contained Wendy app for Woof that can save a locally detected fruit class,
 turn around, recognize a fresh fruit of that class, safely approach it, and return
@@ -20,6 +21,13 @@ hosted inference API, Hugging Face key, or internet connection is used for
 vision inference. The optional voice service streams microphone PCM to
 ElevenLabs Scribe v2 Realtime; motion control and fruit inference remain on
 Woof.
+
+The audience-facing page at `/` is intentionally limited to **Activate Demo**
+and **Stop Now**. Detailed stage controls and telemetry live at `/debug`.
+Every activation records compact preflight, camera, detector, voice, mission,
+and return-home snapshots in browser-local run history, which the debug page
+can display or export as JSON. Reusable single-purpose operator tools live
+under `/tests`; legacy calibration URLs remain as compatibility aliases.
 
 An optional companion stack in [`nav2/`](nav2/README.md) bridges Woof sensors
 read-only into ROS domain 30, builds a map with RTAB-Map, and plans the return
@@ -54,7 +62,8 @@ The canonical audience-facing demo is:
 11. **Walk to the fruit.** Woof steers toward the fresh target while monitoring
     camera age, target age, obstacle avoidance, and motion watchdogs.
 12. **Confirm arrival.** Repeated lower-camera detections establish that Woof is
-    close; a final bounded 10 cm approach may complete the arrival.
+    close. When that confirmed fruit leaves the bottom of the view, Woof sends
+    one 1.0 m/s forward push for 0.4 seconds.
 13. **Stop at the fruit.** All walking commands stop and the active motion lease
     is released.
 14. **Lie down and bark.** Woof runs Unitree `StandDown`, and the voice service
@@ -75,6 +84,25 @@ The canonical audience-facing demo is:
 
 `STOP NOW`, a stop voice command, stale camera data, target loss, localization
 loss, or a motion-watchdog failure must stop Woof during any movement phase.
+
+## Measured forward-command deadband
+
+`MOTION-DEADBAND-001` measured Woof's forward response through Unitree's
+factory `ObstaclesAvoidClient` remote-command path using 0.4-second,
+forward-only pulses. The operator observed no physical movement at 0.25 m/s
+and physical movement at both 0.50 m/s and 1.00 m/s. Until that path is
+recalibrated, treat **0.50 m/s as Woof's minimum reliable forward command on
+this interface**.
+
+This is a measured actuation threshold, not a desired cruising speed. Commands
+below it can be accepted and renewed without producing useful travel. Direct
+`SportClient` calibration subsequently confirmed physical steps at both
+**0.25 m/s** and **0.50 m/s**. The Nav2 controller now uses **0.25 m/s as its
+provisional positive forward-command floor**; zero and rotation-only commands
+are not promoted. Values below 0.25 m/s remain to be tested before calling
+0.25 m/s the exact direct-path deadband boundary.
+Evidence is recorded in
+[`docs/validation-results.md`](docs/validation-results.md#motion-deadband-001--factory-avoidance-forward-command-deadband).
 
 ## Current behavior
 
@@ -115,11 +143,11 @@ loss, or a motion-watchdog failure must stop Woof during any movement phase.
   seconds, and calls `StandUp` before returning Home. The experimental
   standing-point policy remains available only through its manual UI panel and
   is not part of the full fruit sequence.
-- Once repeated detections confirm a fruit at the lower camera edge, a final
-  10 cm nudge that factory avoidance blocks stops cleanly and continues into the
-  same StandDown sequence, even when local odometry reports no additional
-  distance. Camera/pose staleness and target losses before lower-edge
-  confirmation still abort.
+- Once repeated detections confirm a near fruit and it then leaves the lower
+  camera edge, a final time-bounded direct-path push runs at 1.0 m/s for 0.4
+  seconds. Woof sends zero immediately afterward and continues into the same
+  StandDown sequence. Merely seeing the fruit nearby does not trigger the
+  push, and camera or pose staleness still aborts.
 - Loads the Scribe credential from the root-only Wendy persistent volume at
   `/state/elevenlabs.env`. The API key is never baked into an image, committed,
   returned by `/api/status`, or printed to logs.
@@ -413,6 +441,35 @@ The single-peer broker is locally test-validated but is not yet physically
 qualified on Woof. Treat the camera issue as open until a live 30-minute soak
 and forced peer-loss/recovery test show fresh video while mic and bark remain
 usable; mission actuation must be tested separately under operator supervision.
+
+Run the read-only camera and detector soak from a machine that can reach Woof:
+
+```sh
+python tools/camera_fruit_soak.py \
+  --duration-s 1800 \
+  --output artifacts/soak/camera-30m.jsonl
+```
+
+The probe polls the main and voice status endpoints without selecting a target
+or sending a motion command. It fails on stale camera/detector ages, mismatched
+stream generations, frozen broker/runtime/detector frame counters, unhealthy
+camera or GPU state, request errors, or an unexpected reconnect. Every sample
+and a final summary are written as JSON Lines for later diagnosis.
+
+For a recognition trial, hold exactly one requested stage fruit in view and
+require it to appear in at least 80% of fresh samples after a short warm-up:
+
+```sh
+python tools/camera_fruit_soak.py \
+  --duration-s 60 \
+  --expected-fruit pear \
+  --minimum-recognition-ratio 0.80 \
+  --output artifacts/soak/pear-01.jsonl
+```
+
+Repeat the recognition trial ten times for each of `apple`, `banana`, and
+`pear`. Exit status `0` is a pass, `1` is a reliability failure, and `2` is an
+invalid probe configuration.
 
 The stage control sequence is: click `Select` beside the desired detection, wait for
 the Follow button to enable, then click `Follow Selected Fruit` once. `STOP

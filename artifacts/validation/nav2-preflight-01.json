@@ -1,0 +1,41 @@
+{
+  "test_id": "NAV2-PREFLIGHT-001",
+  "completed_at": "2026-07-31T23:30:29Z",
+  "status": "completed_passed",
+  "mode": "stationary_read_only_recovery",
+  "motion_commands_sent": false,
+  "home_pose_saved": false,
+  "navigation_goal_sent": false,
+  "recovery": {
+    "cause": "RTAB-Map persistent SQLite database was malformed and RTAB-Map exited before publishing map or map-to-odom",
+    "corrupt_database": "/maps/collie-rtabmap.db",
+    "quarantined_database": "/maps/collie-rtabmap.corrupt-20260731T232817Z.db",
+    "quarantined_database_bytes": 623894528,
+    "fresh_database": "/maps/collie-rtabmap.db",
+    "fresh_database_bytes_at_completion": 3317760,
+    "autonomy_service_only_restarted": true,
+    "nav2_active_after_autonomy_launch_s": 13.5
+  },
+  "health": {
+    "gateway_ready": true,
+    "main_stage_ready": true,
+    "odom_healthy": true,
+    "scan_healthy": true,
+    "map_healthy": true,
+    "localization_healthy": true,
+    "nav2_healthy": true,
+    "nav2_action_ready": true,
+    "nav2_active": true,
+    "lidar_transform_validated": true
+  },
+  "safety": {
+    "mission_active": false,
+    "navigation_state": "idle",
+    "motion_armed": false,
+    "motion_owner": null,
+    "home": null,
+    "validation": null
+  },
+  "snapshot": "nav2-preflight-01.jpg",
+  "conclusion": "Pass: stationary Nav2 preflight is healthy after recoverably quarantining the malformed RTAB-Map database. This does not validate a navigation goal or return-home motion."
+}

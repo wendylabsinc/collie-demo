@@ -1,0 +1,39 @@
+{
+  "appId": "woof-thermal-monitor",
+  "version": "0.1.0",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "persist",
+      "name": "woof-thermal-monitor-state",
+      "path": "/state"
+    }
+  ],
+  "env": {
+    "WOOF_THERMAL_PORT": "8102",
+    "WOOF_THERMAL_SAMPLE_S": "2",
+    "WOOF_THERMAL_WRITE_S": "30",
+    "WOOF_THERMAL_WARNING_C": "85",
+    "WOOF_THERMAL_CRITICAL_C": "95",
+    "WOOF_THERMAL_CLEAR_C": "80",
+    "WOOF_THERMAL_WARNING_SUSTAIN_S": "10",
+    "WOOF_THERMAL_CLEAR_SUSTAIN_S": "120",
+    "WOOF_THERMAL_BEEP_REPEAT_S": "60",
+    "WOOF_BATTERY_WARNING_PERCENT": "25",
+    "WOOF_BATTERY_CLEAR_PERCENT": "30",
+    "WOOF_BATTERY_RETRY_S": "60",
+    "WOOF_BATTERY_ANNOUNCE_URL": "http://127.0.0.1:8098/api/battery/low",
+    "WOOF_THERMAL_RETENTION_DAYS": "30",
+    "WOOF_THERMAL_BEEP_URL": "http://127.0.0.1:8098/api/thermal/beep",
+    "GO2_NETWORK_INTERFACE": "enP8p1s0"
+  },
+  "readiness": {
+    "tcpSocket": {
+      "port": 8102
+    },
+    "timeoutSeconds": 30
+  }
+}

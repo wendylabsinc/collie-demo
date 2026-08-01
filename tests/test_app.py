@@ -93,16 +93,32 @@ class FakeRuntime:
     async def stop_pointing(self) -> dict[str, object]:
         return {"pointing": {"active": False, "phase": "aborted_safely"}}
 
-    async def set_final_approach_distance(
-        self, distance_m: float
+    async def run_forward_calibration(
+        self, amount_mps: float, confirmation: str
     ) -> dict[str, object]:
-        if not 0.02 <= distance_m <= 0.30:
-            from collie_demo.runtime import RuntimeCommandError
+        return {
+            "direction": "forward",
+            "amount_mps": amount_mps,
+            "pulse_duration_s": 0.4,
+            "movement": None,
+            "confirmation": confirmation,
+            "stopped": True,
+        }
 
-            raise RuntimeCommandError(
-                "final approach distance must be between 0.02 and 0.30 m"
-            )
-        return {"mission": {"config": {"final_approach_distance_m": distance_m}}}
+    async def run_nav2_forward_calibration(
+        self, amount_mps: float, confirmation: str
+    ) -> dict[str, object]:
+        return {
+            "direction": "forward",
+            "motion_path": "direct_sportclient",
+            "requested_amount_mps": amount_mps,
+            "amount_mps": amount_mps,
+            "pulse_duration_s": 0.4,
+            "movement": None,
+            "confirmation": confirmation,
+            "factory_avoidance_enabled": False,
+            "stopped": True,
+        }
 
     async def approve_demo_go(self, confirmation: str) -> dict[str, object]:
         return {
@@ -253,24 +269,85 @@ def test_memory_and_demo_endpoints_are_local_and_explicit(tmp_path: Path) -> Non
         assert client.delete("/api/memory").json()["memory"] is None
 
 
-def test_final_approach_calibration_is_bounded(tmp_path: Path) -> None:
-    (tmp_path / "index.html").write_text("ok")
+def test_forward_calibration_page_and_pulse_are_explicit(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("demo")
+    tests_directory = tmp_path / "tests"
+    tests_directory.mkdir()
+    (tests_directory / "forward-motion.html").write_text("forward calibration")
     runtime = FakeRuntime()
 
     with TestClient(create_app(runtime, tmp_path)) as client:  # type: ignore[arg-type]
-        calibrated = client.post(
-            "/api/calibration/final-approach",
-            json={"distance_m": 0.12},
+        page = client.get("/forward-calibration")
+        assert page.status_code == 200
+        assert page.text == "forward calibration"
+
+        pulse = client.post(
+            "/api/calibration/forward-pulse",
+            json={
+                "amount_mps": 0.06,
+                "confirmation": "PATH CLEAR AND STOP READY",
+            },
         )
-        assert calibrated.status_code == 200
-        assert (
-            calibrated.json()["mission"]["config"]["final_approach_distance_m"]
-            == 0.12
-        )
+        assert pulse.status_code == 200
+        assert pulse.json()["direction"] == "forward"
+        assert pulse.json()["amount_mps"] == 0.06
+        assert pulse.json()["movement"] is None
+        assert pulse.json()["stopped"] is True
         assert client.post(
-            "/api/calibration/final-approach",
-            json={"distance_m": 0.31},
-        ).status_code == 409
+            "/api/calibration/forward-pulse",
+            json={"amount_mps": 0.06},
+        ).status_code == 422
+
+
+def test_debug_and_mini_test_pages_are_routed_from_their_folder(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.html").write_text("demo")
+    (tmp_path / "debug.html").write_text("debug")
+    tests_directory = tmp_path / "tests"
+    tests_directory.mkdir()
+    (tests_directory / "index.html").write_text("test index")
+    (tests_directory / "forward-motion.html").write_text("forward")
+    (tests_directory / "nav2-forward-motion.html").write_text("nav2")
+    (tests_directory / "fruit-detector.html").write_text("fruit")
+
+    with TestClient(create_app(FakeRuntime(), tmp_path)) as client:  # type: ignore[arg-type]
+        assert client.get("/debug").text == "debug"
+        assert client.get("/tests").text == "test index"
+        assert client.get("/tests/forward-motion").text == "forward"
+        assert client.get("/tests/nav2-forward-motion").text == "nav2"
+        assert client.get("/tests/fruit-detector").text == "fruit"
+
+
+def test_nav2_forward_calibration_page_reports_actual_sent_amount(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.html").write_text("demo")
+    tests_directory = tmp_path / "tests"
+    tests_directory.mkdir()
+    (tests_directory / "nav2-forward-motion.html").write_text(
+        "nav2 forward calibration"
+    )
+    runtime = FakeRuntime()
+
+    with TestClient(create_app(runtime, tmp_path)) as client:  # type: ignore[arg-type]
+        page = client.get("/nav2-forward-calibration")
+        assert page.status_code == 200
+        assert page.text == "nav2 forward calibration"
+
+        pulse = client.post(
+            "/api/calibration/nav2-forward-pulse",
+            json={
+                "amount_mps": 0.50,
+                "confirmation": "PATH CLEAR NO AVOIDANCE STOP READY",
+            },
+        )
+        assert pulse.status_code == 200
+        assert pulse.json()["motion_path"] == "direct_sportclient"
+        assert pulse.json()["requested_amount_mps"] == 0.50
+        assert pulse.json()["amount_mps"] == 0.50
+        assert pulse.json()["factory_avoidance_enabled"] is False
+        assert pulse.json()["stopped"] is True
 
 
 def test_pointing_policy_endpoints_are_explicit_and_stoppable(

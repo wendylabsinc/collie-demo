@@ -1,0 +1,42 @@
+{
+  "test_id": "FRUIT-PEAR-001",
+  "completed_at": "2026-07-31T22:20:27Z",
+  "result": "passed",
+  "duration_s": 59.493,
+  "motion_commands_sent": false,
+  "recognition": {
+    "expected_fruit": "pear",
+    "eligible_samples": 114,
+    "matches": 114,
+    "ratio": 1.0,
+    "required_ratio": 0.8,
+    "confidence_minimum": 0.587,
+    "confidence_mean": 0.6602,
+    "confidence_maximum": 0.7202,
+    "deployed_threshold": 0.35
+  },
+  "health": {
+    "samples": 120,
+    "healthy_samples": 120,
+    "failed_samples": 0,
+    "generation_changes": 0,
+    "failure_counts": {}
+  },
+  "camera": {
+    "broker_fps_minimum": 14.1,
+    "broker_fps_mean": 14.2908,
+    "broker_fps_maximum": 14.4,
+    "runtime_fps_minimum": 9.3,
+    "runtime_fps_mean": 9.8858,
+    "runtime_fps_maximum": 10.5,
+    "maximum_broker_frame_age_s": 0.091,
+    "maximum_runtime_frame_age_s": 0.196
+  },
+  "detector": {
+    "maximum_age_s": 0.132,
+    "inference_ms_minimum": 76.2,
+    "inference_ms_mean": 101.9383,
+    "inference_ms_maximum": 195.1
+  },
+  "snapshot": "pear-recognition-01.jpg"
+}

@@ -1,0 +1,48 @@
+{
+  "test_id": "NET-PATH-001",
+  "status": "completed_passed",
+  "mode": "read_only",
+  "method": "synchronized ICMP echo and fresh TCP HTTP requests to both status services",
+  "target_ip": "192.168.0.107",
+  "duration_s": 120.257,
+  "samples": 240,
+  "thresholds": {
+    "minimum_samples": 200,
+    "icmp_slow_ms": 100,
+    "tcp_failure_ms": 1000,
+    "correlation_coefficient": 0.8
+  },
+  "icmp": {
+    "packet_loss": 0,
+    "samples_over_100ms": 3,
+    "minimum_ms": 3.357,
+    "mean_ms": 10.704,
+    "maximum_ms": 243.757
+  },
+  "main_8096": {
+    "request_failures": 0,
+    "samples_over_1000ms": 0,
+    "minimum_total_ms": 13.155,
+    "mean_total_ms": 29.939,
+    "maximum_total_ms": 467.971
+  },
+  "camera_8098": {
+    "request_failures": 0,
+    "samples_over_1000ms": 0,
+    "minimum_total_ms": 11.625,
+    "mean_total_ms": 27.647,
+    "maximum_total_ms": 467.803
+  },
+  "pearson_correlation": {
+    "icmp_vs_main_8096": 0.9456,
+    "icmp_vs_camera_8098": 0.9526,
+    "main_8096_vs_camera_8098": 0.9758
+  },
+  "largest_synchronized_event": {
+    "elapsed_s": 119.756,
+    "icmp_ms": 243.757,
+    "main_8096_total_ms": 467.971,
+    "camera_8098_total_ms": 467.803
+  },
+  "conclusion": "ICMP and both TCP services slowed together with strong correlation. The shared network path materially contributes to the observed latency spikes; this test did not reproduce a one-second failure and does not by itself rule out host scheduling as an additional cause."
+}

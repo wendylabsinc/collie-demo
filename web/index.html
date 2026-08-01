@@ -3,218 +3,60 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Collie Remember &amp; Find</title>
+  <title>Woof Border Collie Demo</title>
   <style>
-    :root{color-scheme:dark;font-family:Inter,system-ui;background:#06120f;color:#effff9}
-    body{max-width:1180px;margin:auto;padding:20px}header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}.header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    h1{margin:.1em 0}.pill,.panel,details{border:1px solid #326b58;border-radius:14px;padding:12px;background:#0b211a}
-    figure{position:relative;margin:16px 0;border:1px solid #326b58;border-radius:16px;overflow:hidden;background:#000}figure img{display:block;width:100%}#camera-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.good{color:#55f09a}.bad{color:#ffbb77}
-    button{font:inherit;border-radius:10px;padding:11px;border:1px solid #458772;background:#174d3a;color:white;font-weight:700;cursor:pointer}
-    button:disabled{opacity:.4;cursor:not-allowed}#run{background:#12733f;min-height:72px;width:100%;font-size:1.1rem}#go{background:#2ead62;min-height:72px;width:100%;font-size:1.25rem;margin-top:10px}#stop,#pointing-stop{background:#8a2727}#reset{background:#805514}#reload{background:#173c4d}
-    .muted{color:#9cbcaf;font-size:.92rem}.detection{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #214b3d}
-    .detection-info{flex:1;min-width:0}.detection.selected{background:#11372a;border-radius:10px;padding-inline:8px}.confidence{font-weight:800;color:#55f09a}
-    .actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.choose,.save{padding:9px 12px;white-space:nowrap}.save{background:#126548}.choose.selected{outline:3px solid #55f09a;background:#226e51}
-    #reference{display:none;width:150px;max-height:130px;object-fit:contain;border:1px solid #458772;border-radius:10px;background:#000;margin-top:8px}
-    #mission-phase{text-transform:uppercase;font-size:1.12rem;font-weight:800}.button-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    #voice-state{font-size:1.12rem;font-weight:800}.voice-command{font-size:1.2rem;color:#55f09a;margin:.55rem 0}.voice-live{min-height:1.5em;font-size:1.35rem;font-weight:800;color:#fff;margin:.55rem 0}.voice-controls{display:flex;gap:8px;flex-wrap:wrap}.voice-controls button{flex:1}.voice-command-form{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,auto);gap:8px;margin:.8rem 0}.voice-command-form input{min-width:0;border:1px solid #458772;border-radius:10px;padding:13px;background:#06120f;color:#fff;font:inherit;font-size:1.08rem}.voice-command-form input:focus{outline:3px solid #55f09a;outline-offset:1px}#voice-submit{background:#2ead62;min-height:56px;font-size:1.05rem}@media(max-width:680px){.voice-command-form{grid-template-columns:1fr}.voice-command-form .form-spacer{display:none}}
-    .pointing-panel{border-color:#6e5f2a;background:linear-gradient(145deg,#16251c,#251f0c)}#pointing-state{font-size:1.22rem;font-weight:900;text-transform:uppercase}.pointing-controls{display:grid;grid-template-columns:1fr 1fr;gap:8px}.pointing-controls button{min-height:66px}#pointing-prepare{background:#785a13}#pointing-run{background:#2ead62;font-size:1.08rem}.policy-metrics{font-variant-numeric:tabular-nums}
-    details{margin-top:12px}summary{cursor:pointer;font-weight:800}code{overflow-wrap:anywhere}input[type=range]{width:min(520px,100%)}output{font-weight:800;color:#55f09a}
+    :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui;background:#07100d;color:#f4fff8}
+    *{box-sizing:border-box}body{min-height:100vh;margin:0;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 20%,#173b2d 0,#07100d 58%)}
+    main{width:min(640px,100%);text-align:center}.eyebrow{color:#8fbea8;letter-spacing:.15em;text-transform:uppercase;font-size:.76rem;font-weight:800}h1{font-size:clamp(2.4rem,9vw,5.8rem);line-height:.9;margin:.25em 0 .18em}p{color:#adc5b9;margin:.5rem auto;max-width:48ch}
+    .activate{width:100%;min-height:150px;margin:36px 0 16px;border:1px solid #58df9d;border-radius:28px;background:#31c778;color:#03160c;font:900 clamp(1.5rem,6vw,2.6rem)/1 system-ui;cursor:pointer;box-shadow:0 18px 60px #0c9d5a40;transition:transform .15s,opacity .15s}
+    .activate:hover:not(:disabled){transform:translateY(-2px)}.activate:disabled{cursor:wait;opacity:.58}.activate.active{background:#153a2b;color:#75e8ad;box-shadow:none}
+    .state{min-height:3.2em;font-weight:700}.good{color:#72e4aa}.bad{color:#ffae8e}.stop{margin-top:12px;border:1px solid #a64848;border-radius:12px;background:#451b1b;color:#ffdede;padding:12px 20px;font:800 1rem system-ui;cursor:pointer}
+    nav{margin-top:32px;display:flex;justify-content:center;gap:20px}a{color:#8fbea8;text-underline-offset:4px;font-size:.9rem}
   </style>
 </head>
 <body>
-  <header>
-    <div><div class="muted">Woof · fruit-class memory, guarded approach, and return home</div><h1>Collie Remember &amp; Find</h1></div>
-    <div class="header-actions">
-      <div id="live" class="pill">Connecting</div>
-      <button id="reload" type="button">RELOAD VIEW</button>
-      <button id="reset" type="button">START OVER (FULL RESET)</button>
-    </div>
-  </header>
-  <figure><img id="camera" src="/camera-stream.mjpg" alt="Woof low-latency camera"><canvas id="camera-overlay" aria-hidden="true"></canvas></figure>
-  <div class="grid">
-    <section class="panel">
-      <b>Voice mission</b>
-      <p class="voice-command">Say just: “apple”, “banana”, or “pear”</p>
-      <p class="muted">A committed fruit word makes Woof bark, capture a stable Home pose, turn and search without the Hello or Stretch gestures, approach that class, lie down for five seconds, stand up, follow the configured return planner to the captured start pose and heading, then listen for the next fruit.</p>
-      <form id="voice-command-form" class="voice-command-form">
-        <label for="voice-command-input" class="muted">1. Type a fruit instead of speaking</label>
-        <span class="form-spacer"></span>
-        <input id="voice-command-input" type="text" inputmode="text" autocomplete="off" maxlength="16" placeholder="apple, banana, or pear" aria-describedby="voice-command-feedback">
-        <button id="voice-submit" type="submit">2. RUN FULL SEQUENCE</button>
-      </form>
-      <p id="voice-command-feedback" class="muted">One click runs bark → stable Home capture → turn/search → approach → lie down/stand up → planned return Home. No additional Go click is required.</p>
-      <div id="voice-state" class="bad">VOICE SERVICE CONNECTING</div>
-      <p id="voice-live" class="voice-live">Listening for speech…</p>
-      <p id="voice-heard" class="muted">Nothing heard yet.</p>
-      <p id="voice-detail" class="muted">Waiting for microphone telemetry.</p>
-      <div class="voice-controls">
-        <button id="voice-start" type="button">START LISTENING</button>
-        <button id="voice-stop" type="button">STOP LISTENING</button>
-        <button id="voice-bark" type="button">TEST BARK</button>
-      </div>
-    </section>
-    <section class="panel">
-      <b>1. Show Woof one fruit</b>
-      <p class="muted">Show Woof one fruit and press Save Class. Woof saves its YOLO label, then acknowledges it with the stock paw-forward Hello gesture.</p>
-      <div id="produce" class="muted">Waiting for inference</div>
-      <p id="produce-meta" class="muted"></p>
-      <p id="target-feedback" class="muted"></p>
-    </section>
-    <section class="panel">
-      <b>Fruit class to find</b>
-      <div id="memory" class="bad">No class saved</div>
-      <img id="reference" alt="Example frame for the saved fruit class">
-      <p id="match" class="muted">No saved-class detection yet</p>
-      <p class="muted">Use Start Over above at any time to stop Woof and clear this round.</p>
-    </section>
-    <section class="panel">
-      <b>2. Turn, find it, then wait for Go</b>
-      <p class="muted">Place one fruit of the saved class behind Woof. Woof captures a stable Home pose, turns, locks that class, stretches, and stops. After Go, it approaches the fruit, lies down for five seconds, stands up, and returns to its saved start pose and heading.</p>
-      <p id="mission-phase" class="bad">IDLE</p>
-      <p id="mission" class="muted">Save a fruit first.</p>
-      <p id="nav-status" class="muted">Return planner connecting.</p>
-      <button id="run" disabled>RUN REMEMBER &amp; FIND</button>
-      <button id="go" disabled>WAITING FOR CLASS</button>
-      <div class="button-row"><button id="stop">STOP NOW</button></div>
-    </section>
-    <section class="panel pointing-panel">
-      <b>Experimental pointing policy (manual only)</b>
-      <p class="muted">This is no longer part of the full demo sequence. For later policy work, manually select one visible fruit above, prepare the guarded handoff, then run the six-second standing-point policy.</p>
-      <p id="pointing-state" class="bad">POINTING POLICY CONNECTING</p>
-      <p id="pointing-detail" class="muted">Waiting for policy and target telemetry.</p>
-      <div class="pointing-controls">
-        <button id="pointing-prepare" type="button" disabled>1 · PREPARE STANDING POINT</button>
-        <button id="pointing-run" type="button" disabled>2 · RUN 6.0s STANDING POINT</button>
-      </div>
-      <div class="button-row"><button id="pointing-stop" type="button" disabled>STOP &amp; RESTORE SPORT MODE</button></div>
-      <p id="pointing-metrics" class="muted policy-metrics">No policy run yet.</p>
-      <p class="muted">The low-level handoff briefly uses verified StandDown because releasing Sport mode while standing would drop Woof. It then lifts into the standing point. Fresh bbox, unchanged target lock, roll, pitch, joint-speed, torque, command-envelope, recovery, and Sport-mode guards remain active. There is no bypass button.</p>
-    </section>
-  </div>
-  <details open>
-    <summary>Touch-range calibration</summary>
-    <p class="muted">After the fruit disappears at the bottom camera edge, Woof uses local odometry to travel exactly this much farther. Start at 10 cm; adjust only after measuring the remaining paw-to-fruit gap.</p>
-    <label for="final-distance">Extra measured travel: <output id="final-distance-value">10 cm</output></label>
-    <p><input id="final-distance" type="range" min="2" max="30" step="1" value="10"></p>
-    <button id="save-calibration" type="button">APPLY TOUCH RANGE</button>
-    <p id="calibration-status" class="muted">Waiting for final-approach telemetry.</p>
-  </details>
-  <details>
-    <summary>Manual follower fallback</summary>
-    <p class="muted">The validated click-to-follow path remains available independently of the memory demo.</p>
-    <div id="target" class="bad">Choose a detected fruit</div>
-    <div id="command" class="muted">motion zero</div>
-    <div id="monitor" class="muted">Waiting for stage-health telemetry</div>
-    <p><button id="follow" disabled>FOLLOW SELECTED FRUIT</button></p>
-  </details>
+  <main>
+    <div class="eyebrow">Woof · Border Collie</div>
+    <h1>Ready to work.</h1>
+    <p>Clear the turn, fruit, and return paths. Activate Woof, then say “apple”, “banana”, or “pear”.</p>
+    <button id="activate" class="activate" type="button">ACTIVATE DEMO</button>
+    <div id="state" class="state">Checking the stage…</div>
+    <button id="stop" class="stop" type="button">STOP NOW</button>
+    <nav aria-label="Operator tools"><a href="/debug">Debug console</a><a href="/tests">Mini tests</a></nav>
+  </main>
   <script>
-    const live=document.querySelector('#live'),camera=document.querySelector('#camera'),cameraOverlay=document.querySelector('#camera-overlay'),target=document.querySelector('#target'),command=document.querySelector('#command'),monitor=document.querySelector('#monitor'),produce=document.querySelector('#produce'),produceMeta=document.querySelector('#produce-meta'),targetFeedback=document.querySelector('#target-feedback'),follow=document.querySelector('#follow'),stop=document.querySelector('#stop'),run=document.querySelector('#run'),go=document.querySelector('#go'),reset=document.querySelector('#reset'),reload=document.querySelector('#reload'),memoryView=document.querySelector('#memory'),reference=document.querySelector('#reference'),missionPhase=document.querySelector('#mission-phase'),missionView=document.querySelector('#mission'),navStatus=document.querySelector('#nav-status'),matchView=document.querySelector('#match'),finalDistance=document.querySelector('#final-distance'),finalDistanceValue=document.querySelector('#final-distance-value'),saveCalibration=document.querySelector('#save-calibration'),calibrationStatus=document.querySelector('#calibration-status'),voiceState=document.querySelector('#voice-state'),voiceLive=document.querySelector('#voice-live'),voiceHeard=document.querySelector('#voice-heard'),voiceDetail=document.querySelector('#voice-detail'),voiceCommandForm=document.querySelector('#voice-command-form'),voiceCommandInput=document.querySelector('#voice-command-input'),voiceCommandFeedback=document.querySelector('#voice-command-feedback'),voiceSubmit=document.querySelector('#voice-submit'),voiceStart=document.querySelector('#voice-start'),voiceStop=document.querySelector('#voice-stop'),voiceBark=document.querySelector('#voice-bark'),pointingState=document.querySelector('#pointing-state'),pointingDetail=document.querySelector('#pointing-detail'),pointingMetrics=document.querySelector('#pointing-metrics'),pointingPrepare=document.querySelector('#pointing-prepare'),pointingRun=document.querySelector('#pointing-run'),pointingStop=document.querySelector('#pointing-stop');
-    let following=false,demoActive=false,pointingActive=false,pointingActionInFlight=false,startingFollow=false,startingDemo=false,sendingGo=false,capturing=false,resetting=false,refreshInFlight=false,voiceRefreshInFlight=false,voiceActionInFlight=false,stopPromise=null,memoryId=null,roundId=null,uiRoundGeneration=0,calibrationDirty=false,savingCalibration=false;
+    const activate=document.querySelector('#activate'),state=document.querySelector('#state'),stop=document.querySelector('#stop');
     const voiceOrigin=`${location.protocol}//${location.hostname}:8098`;
-    async function api(path,body){const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok){const e=await r.json();throw new Error(e.detail||r.statusText)}return r.json()}
-    async function remove(path){const r=await fetch(path,{method:'DELETE'});if(!r.ok){const e=await r.json();throw new Error(e.detail||r.statusText)}return r.json()}
-    function closestSelectedIndex(detections,name,hint){
-      if(!name||!hint)return -1;
-      let best=-1,bestDistance=Infinity;
-      detections.forEach((item,index)=>{if(item.label!==name)return;const distance=(item.center[0]-hint[0])**2+(item.center[1]-hint[1])**2;if(distance<bestDistance){bestDistance=distance;best=index}});
-      return best;
-    }
-    function renderProduce(state,selectedName,selectedHint){
-      produce.replaceChildren();
-      if(!state){produce.textContent='Fruit model disabled';produceMeta.textContent='';return}
-      if(!state.detections.length){produce.textContent=state.error||'No fruit detected'}
-      const selectedIndex=closestSelectedIndex(state.detections,selectedName,selectedHint);
-      for(const [index,item] of state.detections.entries()){
-        const isSelected=index===selectedIndex,row=document.createElement('div'),info=document.createElement('div'),score=document.createElement('div'),details=document.createElement('div'),actions=document.createElement('div'),save=document.createElement('button'),choose=document.createElement('button');
-        row.className=`detection${isSelected?' selected':''}`;info.className='detection-info';score.className='confidence';score.textContent=`${item.label} · ${(item.confidence*100).toFixed(1)}%`;details.className='muted';details.textContent=`center (${item.center[0]}, ${item.center[1]}) · box (${item.bbox_xyxy.join(', ')})`;actions.className='actions';save.className='save';save.textContent=resetting?'RESETTING…':capturing?'SAVING…':'SAVE CLASS';save.disabled=resetting||capturing||pointingActive||!roundId;save.onclick=()=>rememberFruit(item.label,item.center);choose.className=`choose${isSelected?' selected':''}`;choose.textContent=isSelected?'Selected':'Manual Select';choose.disabled=resetting||pointingActive;choose.onclick=()=>chooseTarget(item.label,item.center);info.append(score,details);actions.append(save,choose);row.append(info,actions);produce.append(row)
-      }
-      const classCount=Object.keys(state.classes||{}).length,device=state.device||{},fps=state.inference_ms?`${(1000/state.inference_ms).toFixed(1)} detector FPS`:'— detector FPS';
-      produceMeta.textContent=`${classCount} classes · ${device.resolved||'unknown device'} · ${fps} · inference ${state.inference_ms??'—'} ms · age ${state.age_s??'—'} s`;
-    }
-    function renderOverlay(s){
-      const width=s.frame_width||camera.naturalWidth,height=s.frame_height||camera.naturalHeight;if(!width||!height)return;
-      if(cameraOverlay.width!==width)cameraOverlay.width=width;if(cameraOverlay.height!==height)cameraOverlay.height=height;
-      const ctx=cameraOverlay.getContext('2d');ctx.clearRect(0,0,width,height);ctx.lineWidth=Math.max(3,width/420);ctx.font=`bold ${Math.max(20,width/48)}px system-ui`;
-      const selectedIndex=closestSelectedIndex(s.produce?.detections||[],s.selected_target_name,s.selected_target_hint);
-      for(const [index,item] of (s.produce?.detections||[]).entries()){
-        const [x1,y1,x2,y2]=item.bbox_xyxy,selected=index===selectedIndex,color=selected?'#55f09a':'#ffd34f',label=`${item.label} ${(item.confidence*100).toFixed(0)}%`;
-        ctx.strokeStyle=color;ctx.fillStyle=color;ctx.strokeRect(x1,y1,x2-x1,y2-y1);const metrics=ctx.measureText(label),textHeight=Math.max(25,width/40),textTop=Math.max(0,y1-textHeight);ctx.fillRect(x1,textTop,metrics.width+16,textHeight);ctx.fillStyle='#06120f';ctx.fillText(label,x1+8,textTop+textHeight-5);
-      }
-    }
-    function seenLabel(observation){if(!observation)return 'not tracked';return observation.confidence===null?`${observation.visible_frames} frames · tracker awaiting YOLO check`:`${observation.visible_frames} frames · YOLO ${Math.round(observation.confidence*100)}%`}
-    function updateFollowButton(canFollow,readiness=''){const waiting=readiness==='selected_target_not_stable'?'WAITING FOR STABLE TRACK':readiness==='selected_target_not_revalidated'?'WAITING FOR YOLO':readiness==='selected_target_stale'?'WAITING FOR FRESH FRAME':'FOLLOW SELECTED FRUIT';follow.textContent=following?'FOLLOWING…':startingFollow?'STARTING…':canFollow?'FOLLOW SELECTED FRUIT':waiting;follow.title=canFollow?'Ready to follow':readiness.replaceAll('_',' ');follow.disabled=following||startingFollow||!canFollow}
-    function renderMission(s){
-      const m=s.mission||{},saved=s.memory,last=m.last_match,best=last?.best;
-      demoActive=Boolean(m.active);missionPhase.textContent=(m.phase||'idle').replaceAll('_',' ');missionPhase.className=(m.phase==='success'||m.phase==='memorized'||m.phase==='waiting_for_go')?'good':(m.phase==='aborted'?'bad':'');
-      const stretch=m.match_stretch_status&&m.match_stretch_status!=='not_requested'?` · stretch ${m.match_stretch_status}`:'',arrival=m.arrival_hello_status&&m.arrival_hello_status!=='not_requested'?` · arrival paw ${m.arrival_hello_status}`:'',rest=m.arrival_rest_status&&m.arrival_rest_status!=='not_requested'?` · lay-down ${m.arrival_rest_status}`:'',pointing=m.arrival_pointing_status&&m.arrival_pointing_status!=='not_requested'?` · reach ${m.arrival_pointing_status}${m.arrival_pointing_target?` (${m.arrival_pointing_target})`:''} · contact ${m.contact_status||'unverified'}`:'',homeFrame=m.home_pose?.frame_id||'local_odom',homeCheck=m.home_pose_validation?` · Home ${homeFrame} lock ${m.home_pose_validation.sample_count} samples / ${Number(m.home_pose_validation.maximum_position_span_m).toFixed(3)}m drift / ${Number(m.home_pose_validation.maximum_yaw_span_deg).toFixed(1)}° yaw drift`:'',returnState=m.return_home_enabled?` · home ${m.return_home_status}${m.return_distance_m===null||m.return_distance_m===undefined?'':` ${Number(m.return_distance_m).toFixed(2)}m away`}`:'';
-      const search=m.phase==='searching'?` · search ${m.search_progress_deg??0}°/${m.search_sweep_deg??0}° at ${Number(m.search_rate_rps??0).toFixed(2)} rad/s`:'';
-      missionView.textContent=`${m.reason||m.readiness||'idle'}${stretch}${arrival}${rest}${pointing}${homeCheck}${returnState} · turn ${m.turn_progress_deg??0}° at ${Number(m.turn_rate_rps??0).toFixed(2)} rad/s (${m.direct_turn_enabled?'direct yaw':'avoidance'})${search} · confirmations ${m.match_confirmations??0} · pose ${m.heading?.pose_healthy?'fresh':'unavailable'}`;
-      const backend=m.return_backend||'local_odometry',nav=m.nav2_status||{},navHealth=m.nav2_health||{};if(backend==='nav2'){const healthy=Boolean(navHealth.ready),state=nav.state||'idle',distance=nav.distance_remaining_m===null||nav.distance_remaining_m===undefined?'':` · ${Number(nav.distance_remaining_m).toFixed(2)}m remaining`;navStatus.textContent=`Return planner: Nav2 map frame · ${state}${distance} · ${nav.reason||navHealth.reason||'waiting for map health'} · localization ${navHealth.localization_healthy?'fresh':'NOT READY'} · map ${navHealth.map_healthy?'fresh':'NOT READY'} · Hesai scan ${navHealth.scan_healthy?'fresh':'NOT READY'}`;navStatus.className=healthy?'good':'bad'}else{navStatus.textContent='Return planner: local odometry fallback · no global obstacle-detour planning';navStatus.className='muted'}
-      if(!calibrationDirty&&!savingCalibration&&Number.isFinite(m.final_approach_distance_m)){const cm=Math.round(m.final_approach_distance_m*100);finalDistance.value=cm;finalDistanceValue.textContent=`${cm} cm`}
-      saveCalibration.disabled=Boolean(m.active)||following||pointingActive||resetting||savingCalibration;calibrationStatus.textContent=`final approach ${m.final_approach_status||'not requested'} · measured ${Number(m.final_approach_measured_distance_m??0).toFixed(2)} m · commanded estimate ${Number(m.final_approach_commanded_distance_m??0).toFixed(2)} m`;
-      run.textContent=m.active?`${(m.phase||'running').toUpperCase()}…`:saved?`FIND THIS ${saved.label.toUpperCase()} & RETURN`:'RUN REMEMBER & FIND';run.disabled=resetting||startingDemo||pointingActive||m.active||!m.can_start;run.title=m.readiness||'';
-      go.textContent=sendingGo?'SENDING GO…':m.phase==='waiting_for_go'?'GO TO FRUIT':'WAITING FOR CLASS';go.disabled=resetting||sendingGo||pointingActive||!m.can_go;go.title=m.go_readiness||'';
-      if(saved){memoryView.textContent=`Saved class: ${saved.label}`;memoryView.className='good';if(memoryId!==saved.id){memoryId=saved.id;if(saved.has_reference){reference.src=`/api/memory/reference.jpg?t=${encodeURIComponent(saved.id)}`;reference.style.display='block'}else{reference.removeAttribute('src');reference.style.display='none'}}}
-      else{memoryId=null;memoryView.textContent='No class saved';memoryView.className='bad';reference.removeAttribute('src');reference.style.display='none'}
-      matchView.textContent=best?`${best.label} class locked · YOLO ${(best.detector_confidence*100).toFixed(1)}% · ${last.candidate_count} candidate${last.candidate_count===1?'':'s'}`:'No saved-class detection yet';
-    }
-    function renderPointing(s){
-      const p=s.pointing||{},report=p.last_report||{};pointingActive=Boolean(p.active);
-      const phase=(p.phase||'unavailable').replaceAll('_',' '),good=p.phase==='prepared'||p.phase==='complete',bad=!p.available||p.phase==='fault'||p.phase==='restore_failed';
-      pointingState.textContent=`${phase}${p.target_label?` · ${p.target_label}`:''}`;pointingState.className=good?'good':bad?'bad':'';
-      pointingDetail.textContent=p.active?'Policy owns low-level control. Keep the robot clear; Stop requests a guarded return.':p.prepared?`${p.readiness}. Select or reselect the visible fruit after the camera settles.`:p.readiness||p.error||'Waiting for policy.';
-      pointingPrepare.disabled=pointingActionInFlight||!p.can_prepare;pointingPrepare.textContent=pointingActionInFlight?'WORKING…':p.prepared?'PREPARE AGAIN':'1 · PREPARE STANDING POINT';
-      pointingRun.disabled=pointingActionInFlight||!p.can_run;pointingRun.textContent=p.active?'STANDING POINT…':`2 · RUN ${Number(p.duration_s??6).toFixed(1)}s STANDING POINT`;
-      pointingStop.disabled=pointingActionInFlight||!p.active;
-      if(report.outcome){const confidence=report.confidence_range?`${(report.confidence_range[0]*100).toFixed(0)}–${(report.confidence_range[1]*100).toFixed(0)}%`: '—';pointingMetrics.textContent=`${report.outcome.replaceAll('_',' ')} · ${report.policy_ticks??0} policy ticks · bbox ${confidence} · max roll ${report.maximum_roll_rad??'—'} rad · max speed ${report.maximum_joint_speed_rad_s??'—'} rad/s · max torque ${report.maximum_estimated_torque??'—'} · Sport restored ${report.controller_restored?'yes':'NO'}${report.error?` · ${report.error}`:''}`}
-      else pointingMetrics.textContent=`Policy 50 Hz · motor output 500 Hz · selected bbox must remain fresh · ${p.error||'no run yet'}`;
+    const RUN_HISTORY_KEY='collie-demo-run-history-v1',ACTIVE_RUN_KEY='collie-demo-active-run-v1';
+    let activating=false,stageReady=false,voiceReady=false,missionBusy=false,listening=false,latestDemo=null,latestVoice=null,activeRunId=sessionStorage.getItem(ACTIVE_RUN_KEY);
+    async function getJson(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(response.statusText);return response.json()}
+    async function postJson(url){const response=await fetch(url,{method:'POST'}),data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.detail||data.error||response.statusText);return data}
+    function readRuns(){try{return JSON.parse(localStorage.getItem(RUN_HISTORY_KEY)||'[]')}catch{return []}}
+    function writeRuns(runs){localStorage.setItem(RUN_HISTORY_KEY,JSON.stringify(runs.slice(0,30)))}
+    function compactSnapshot(demo={},voice={}){const mission=demo.mission||{},produce=demo.produce||{};return{at:new Date().toISOString(),stage_ready:Boolean(demo.stage_ready),health:demo.health||{},camera:{fps:demo.camera_fps??null,age_s:demo.frame_age_s??null,error:demo.last_error||null},produce:{detections:(produce.detections||[]).map(item=>({label:item.label,confidence:item.confidence})),error:produce.error||null},mission:{phase:mission.phase||'idle',reason:mission.reason||null,active:Boolean(mission.active),return_home_status:mission.return_home_status||null,return_distance_m:mission.return_distance_m??null,nav2_status:mission.nav2_status||null},voice:{listening:Boolean(voice.listening),mission_busy:Boolean(voice.mission_busy),last_event:voice.last_event||null,last_heard:voice.last_heard||'',last_target:voice.last_target||null,last_error:voice.last_error||null}}}
+    function startRun(){const now=new Date().toISOString(),id=`run-${Date.now()}-${Math.random().toString(16).slice(2,8)}`,snapshot=compactSnapshot(latestDemo||{},latestVoice||{}),runs=readRuns();runs.unshift({id,started_at:now,ended_at:null,outcome:'activation_requested',stages:{activation:{first_seen_at:now,last_seen_at:now,samples:1,result:snapshot}},timeline:[{event:'activate_clicked',snapshot}]});writeRuns(runs);activeRunId=id;sessionStorage.setItem(ACTIVE_RUN_KEY,id);return id}
+    function updateRun(demo,voice,event=null){if(!activeRunId)return;const runs=readRuns(),record=runs.find(item=>item.id===activeRunId);if(!record)return;const snapshot=compactSnapshot(demo,voice),phase=snapshot.mission.phase||'idle',stage=record.stages[phase]||{first_seen_at:snapshot.at,last_seen_at:snapshot.at,samples:0,result:snapshot};stage.last_seen_at=snapshot.at;stage.samples+=1;stage.result=snapshot;record.stages[phase]=stage;const previous=record.timeline.at(-1);if(event||!previous||previous.snapshot?.mission?.phase!==phase||previous.snapshot?.voice?.last_event!==snapshot.voice.last_event)record.timeline.push({event:event||`phase:${phase}`,snapshot});record.timeline=record.timeline.slice(-60);record.last_snapshot=snapshot;if(snapshot.voice.last_event==='voice_mission_complete_ready'||phase==='success'){record.outcome='complete';record.ended_at=snapshot.at;activeRunId=null;sessionStorage.removeItem(ACTIVE_RUN_KEY)}else if(snapshot.voice.last_event==='voice_mission_failed'||snapshot.voice.last_event==='voice_mission_aborted_ready'||phase==='aborted'){record.outcome='stopped_or_failed';record.ended_at=snapshot.at;activeRunId=null;sessionStorage.removeItem(ACTIVE_RUN_KEY)}writeRuns(runs)}
+    function finishRun(outcome,event){if(!activeRunId)return;const runs=readRuns(),record=runs.find(item=>item.id===activeRunId);if(record){const snapshot=compactSnapshot(latestDemo||{},latestVoice||{});record.outcome=outcome;record.ended_at=snapshot.at;record.last_snapshot=snapshot;record.timeline.push({event,snapshot});writeRuns(runs)}activeRunId=null;sessionStorage.removeItem(ACTIVE_RUN_KEY)}
+    function render(){
+      activate.disabled=activating||missionBusy||listening||!stageReady||!voiceReady;
+      activate.classList.toggle('active',listening||missionBusy);
+      activate.textContent=activating?'ACTIVATING…':missionBusy?'DEMO RUNNING':listening?'DEMO ACTIVE':'ACTIVATE DEMO';
+      if(missionBusy){state.textContent='Woof is running the fruit mission. STOP NOW remains available.';state.className='state good'}
+      else if(!stageReady){state.textContent='Stage preflight is not ready. Open Debug for the failing check.';state.className='state bad'}
+      else if(!voiceReady){state.textContent='Voice input is not ready. Open Debug for microphone details.';state.className='state bad'}
+      else if(listening){state.textContent='Listening. Say apple, banana, or pear.';state.className='state good'}
+      else{state.textContent='Stage ready. Activate when the full area is clear.';state.className='state'}
     }
     async function refresh(){
-      if(refreshInFlight)return;refreshInFlight=true;
       try{
-        const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()),selected=s.selected_target_name,selectedObservation=s.selected_target,failedHealth=Object.entries(s.health||{}).filter(([,ok])=>!ok).map(([name])=>name.replaceAll('_',' '));roundId=s.round_id||roundId;
-        live.textContent=s.stage_ready?'STAGE READY':`NOT READY${failedHealth.length?`: ${failedHealth.join(', ')}`:''}`;live.className=`pill ${s.stage_ready?'good':'bad'}`;target.textContent=selected?`${selected} · ${seenLabel(selectedObservation)}`:'Choose a detected fruit';target.className=selectedObservation?'good':'bad';command.textContent=`${s.command.reason} · forward ${s.command.forward_mps.toFixed(2)} m/s · yaw ${s.command.yaw_rps.toFixed(2)} rad/s · ${s.forward_remaining_s.toFixed(1)}s remaining`;following=Boolean(s.follow_active);
-        const tracker=s.produce?.tracker,misses=tracker?.revalidation_failures??0,required=tracker?.revalidation_failures_required??3,verified=tracker?.last_verified_age_s;monitor.textContent=`camera ${s.camera_fps??'—'} FPS / age ${s.frame_age_s??'—'}s · YOLO verified ${verified??'—'}s ago · misses ${misses}/${required} · motion ${s.motion?.fault||((s.health?.motion_ready)?'ready':'not ready')}`;
-        renderProduce(s.produce,selected,s.selected_target_hint);renderOverlay(s);renderMission(s);renderPointing(s);updateFollowButton(Boolean(s.can_follow),s.follow_readiness||'');
-      }catch(e){live.textContent='APP UNAVAILABLE';live.className='pill bad'}finally{refreshInFlight=false}
+        const [demo,voice]=await Promise.all([getJson('/api/status'),getJson(`${voiceOrigin}/api/status`)]);latestDemo=demo;latestVoice=voice;
+        stageReady=Boolean(demo.stage_ready);voiceReady=Boolean(voice.credential_configured&&voice.input_ready);missionBusy=Boolean(voice.mission_busy);listening=Boolean(voice.listening);render();
+        updateRun(demo,voice);
+      }catch(error){stageReady=false;voiceReady=false;state.textContent=`Demo services unavailable: ${error.message}`;state.className='state bad';render()}
     }
-    async function voiceApi(path,body){const r=await fetch(`${voiceOrigin}${path}`,{method:'POST',headers:body?{'content-type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail||data.error||r.statusText);return data}
-    function typedFruit(){const value=voiceCommandInput.value.trim().toLowerCase();return value==='apple'||value==='banana'||value==='pear'?value:''}
-    function updateTypedCommand(s={}){const fruit=typedFruit(),busy=Boolean(s.mission_busy);voiceCommandInput.disabled=voiceActionInFlight||busy;voiceSubmit.disabled=voiceActionInFlight||busy||!fruit;voiceSubmit.textContent=voiceActionInFlight?'STARTING FULL SEQUENCE…':busy?'FULL SEQUENCE RUNNING…':fruit?`RUN ${fruit.toUpperCase()} FULL SEQUENCE`:'2. RUN FULL SEQUENCE'}
-    function renderVoice(s){
-      const listening=Boolean(s.listening),scribe=Boolean(s.scribe_connected),micFresh=Number.isFinite(s.mic_age_s)&&s.mic_age_s<1,healthy=Boolean(s.credential_configured&&(s.input_ready??(s.webrtc_connected&&micFresh))),missionBusy=Boolean(s.mission_busy);
-      voiceState.textContent=!healthy?'VOICE NOT READY':missionBusy?'MISSION ACTIVE':listening&&scribe&&micFresh?'LISTENING':'VOICE CONNECTING';
-      voiceState.className=healthy&&(!listening||(scribe&&micFresh))?'good':'bad';
-      voiceLive.textContent=s.last_partial?`“${s.last_partial}”`:missionBusy?`Working on ${s.last_target||'fruit'}…`:listening?'Listening for a fruit word…':'Listening paused.';
-      voiceHeard.textContent=s.last_heard?`Heard: “${s.last_heard}”${s.last_target?` · target ${s.last_target}`:''}`:'Nothing heard yet.';
-      voiceDetail.textContent=`${s.last_event||'starting'} · source ${s.mic_source||'Go2'} · mic ${s.mic_frames??0} frames / age ${s.mic_age_s??'—'}s · Scribe ${scribe?'connected':'offline'} · arrival bark ${s.arrival_bark_status||'not requested'}${s.last_spoken?` · speaker “${s.last_spoken}”`:''}${s.last_error?` · ${s.last_error}`:''}`;
-      voiceStart.disabled=voiceActionInFlight||listening;voiceStop.disabled=voiceActionInFlight||!listening;voiceBark.disabled=voiceActionInFlight||!s.webrtc_connected;
-      if(missionBusy)voiceCommandFeedback.textContent=`Full sequence running for ${s.last_target||'fruit'}. No more input is required; STOP NOW remains available.`;
-      else if(s.last_event==='voice_mission_complete_ready')voiceCommandFeedback.textContent='Full sequence complete. Woof returned Home and is ready for another fruit.';
-      else if(s.last_event==='voice_mission_aborted_ready'||s.last_event==='voice_mission_failed')voiceCommandFeedback.textContent=`Full sequence stopped: ${s.last_error||'mission aborted'}`;
-      updateTypedCommand(s);
-    }
-    async function refreshVoice(){
-      if(voiceRefreshInFlight)return;voiceRefreshInFlight=true;
-      try{const s=await fetch(`${voiceOrigin}/api/status`,{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(r.statusText);return r.json()});renderVoice(s)}
-      catch(e){voiceState.textContent='VOICE SERVICE UNAVAILABLE';voiceState.className='bad';voiceDetail.textContent=e.message;voiceStart.disabled=true;voiceStop.disabled=true;voiceBark.disabled=true;voiceCommandInput.disabled=true;voiceSubmit.disabled=true}
-      finally{voiceRefreshInFlight=false}
-    }
-    async function voiceAction(path){if(voiceActionInFlight)return;voiceActionInFlight=true;try{renderVoice(await voiceApi(path))}catch(e){voiceDetail.textContent=e.message}finally{voiceActionInFlight=false;await refreshVoice()}}
-    async function submitTypedFruit(event){event.preventDefault();if(voiceActionInFlight)return;const fruit=typedFruit();if(!fruit){voiceCommandFeedback.textContent='Type exactly apple, banana, or pear.';updateTypedCommand();return}voiceActionInFlight=true;updateTypedCommand();voiceCommandFeedback.textContent=`Starting the complete ${fruit} sequence…`;try{const s=await voiceApi('/api/command',{command:fruit});voiceCommandInput.value='';voiceCommandFeedback.textContent=`${fruit} accepted. No more input is needed; Woof will return Home on its own.`;renderVoice(s)}catch(e){voiceCommandFeedback.textContent=e.message}finally{voiceActionInFlight=false;await refreshVoice()}}
-    async function pointingAction(path,confirmation){if(pointingActionInFlight)return;pointingActionInFlight=true;try{const s=await api(path,confirmation?{confirmation}:undefined);renderPointing(s);targetFeedback.textContent=path.endsWith('/prepare')?'Standing-point handoff prepared. Wait for the camera and selected bbox to settle, then run the point.':path.endsWith('/run')?'Standing-point policy started.':'Pointing stop requested; waiting for safe controller restoration.'}catch(e){pointingDetail.textContent=e.message}finally{pointingActionInFlight=false;await refresh()}}
-    async function rememberFruit(name,center){if(capturing||!roundId)return;const requestGeneration=uiRoundGeneration;capturing=true;targetFeedback.textContent=`Saving class ${name}…`;try{const s=await api('/api/memory/capture',{target:name,center,round_id:roundId});if(requestGeneration!==uiRoundGeneration)return;const hello=s.mission?.initial_hello_status;if(hello==='complete')targetFeedback.textContent=`Class ${name} saved. Woof acknowledged it with a paw. Place a ${name} behind Woof.`;else if(hello==='failed')targetFeedback.textContent=`Class ${name} was saved, but the Hello gesture failed: ${s.mission?.initial_hello_error||'unknown SDK error'}`;else targetFeedback.textContent=`Class ${name} saved. Place a ${name} behind Woof.`}catch(e){if(requestGeneration===uiRoundGeneration)targetFeedback.textContent=e.message}finally{if(requestGeneration===uiRoundGeneration){capturing=false;await refresh()}}}
-    async function chooseTarget(name,center){following=false;startingFollow=false;try{await api('/api/target',{target:name,center});targetFeedback.textContent=`${name} selected for manual fallback.`;await refresh()}catch(e){targetFeedback.textContent=e.message}}
-    async function stopMotion(){if(!stopPromise)stopPromise=api('/api/stop').catch(()=>{}).finally(()=>{stopPromise=null});return stopPromise}
-    async function beginDemo(){if(startingDemo)return;startingDemo=true;try{await api('/api/demo/start',{confirmation:'TARGET SAVED AND AREA CLEAR'});targetFeedback.textContent='Demo active: Woof will turn and find the saved fruit, then wait for Go.'}catch(e){targetFeedback.textContent=e.message}finally{startingDemo=false;await refresh()}}
-    async function approveGo(){if(sendingGo)return;sendingGo=true;go.disabled=true;try{await api('/api/demo/go',{confirmation:'CLASS LOCKED AND PATH CLEAR'});targetFeedback.textContent='Go accepted. Woof is rechecking the saved fruit class before approaching.'}catch(e){targetFeedback.textContent=e.message}finally{sendingGo=false;await refresh()}}
-    async function beginFollow(){if(following||startingFollow)return;startingFollow=true;updateFollowButton(false,'starting');try{const s=await api('/api/follow',{confirmation:'TARGET AND PATH CLEAR'});following=Boolean(s.follow_active);targetFeedback.textContent='Robot-side follow is active. Press Stop Now to stop early.'}catch(e){if(startingFollow)targetFeedback.textContent=e.message}finally{startingFollow=false;await refresh()}}
-    async function applyCalibration(){if(savingCalibration)return;savingCalibration=true;saveCalibration.disabled=true;const cm=Number(finalDistance.value);try{await api('/api/calibration/final-approach',{distance_m:cm/100});calibrationDirty=false;calibrationStatus.textContent=`Touch range set to ${cm} cm.`}catch(e){calibrationStatus.textContent=e.message}finally{savingCalibration=false;await refresh()}}
-    async function resetRound(){if(resetting)return;resetting=true;uiRoundGeneration+=1;following=false;demoActive=false;pointingActive=false;startingFollow=false;startingDemo=false;sendingGo=false;capturing=false;memoryId=null;roundId=null;reset.disabled=true;reset.textContent='STOPPING & RESETTING EVERYTHING…';targetFeedback.textContent='Stopping Woof and resetting the complete demo…';try{const s=await api('/api/round/reset');roundId=s.round_id||null;targetFeedback.textContent='New round ready. Show Woof a fruit and press Save Class.'}catch(e){targetFeedback.textContent=e.message}finally{resetting=false;reset.disabled=false;reset.textContent='START OVER (FULL RESET)';await refresh()}}
-    function endFollow(){const shouldStop=following||demoActive||pointingActive||startingFollow||startingDemo||sendingGo;following=false;demoActive=false;pointingActive=false;startingFollow=false;startingDemo=false;sendingGo=false;if(shouldStop)fetch('/api/stop',{method:'POST',keepalive:true}).catch(()=>{})}
-    async function emergencyStop(){following=false;demoActive=false;pointingActive=false;startingFollow=false;startingDemo=false;sendingGo=false;await stopMotion();targetFeedback.textContent='Stopped; pointing recovery requested if it was active.';await refresh()}
-    finalDistance.oninput=()=>{calibrationDirty=true;finalDistanceValue.textContent=`${finalDistance.value} cm`};saveCalibration.onclick=applyCalibration;camera.onerror=()=>setTimeout(()=>{camera.src=`/camera-stream.mjpg?t=${Date.now()}`},500);follow.onclick=beginFollow;run.onclick=beginDemo;go.onclick=approveGo;pointingPrepare.onclick=()=>pointingAction('/api/pointing/prepare','WOOF IS CLEAR FOR STANDING POINT');pointingRun.onclick=()=>pointingAction('/api/pointing/run','AREA IS CLEAR AND WOOF MAY MOVE');pointingStop.onclick=()=>pointingAction('/api/pointing/stop');reset.onclick=resetRound;reload.onclick=()=>window.location.reload();voiceCommandInput.oninput=()=>updateTypedCommand();voiceCommandForm.onsubmit=submitTypedFruit;voiceStart.onclick=()=>voiceAction('/api/listen/start');voiceStop.onclick=()=>voiceAction('/api/listen/stop');voiceBark.onclick=()=>voiceAction('/api/bark');window.addEventListener('pagehide',endFollow);stop.onclick=emergencyStop;refresh();refreshVoice();setInterval(refresh,250);setInterval(refreshVoice,500);
+    activate.onclick=async()=>{if(activating)return;activating=true;startRun();render();try{const voice=await postJson(`${voiceOrigin}/api/listen/start`);latestVoice=voice;listening=Boolean(voice.listening);updateRun(latestDemo||{},voice,'listening_started');state.textContent='Listening. Say apple, banana, or pear.'}catch(error){finishRun('activation_failed',`activation_failed:${error.message}`);state.textContent=error.message;state.className='state bad'}finally{activating=false;await refresh()}};
+    stop.onclick=async()=>{stop.disabled=true;state.textContent='Stopping…';try{await Promise.allSettled([postJson('/api/stop'),postJson(`${voiceOrigin}/api/listen/stop`)]);listening=false;missionBusy=false;finishRun('stopped_by_operator','stop_clicked');state.textContent='Stopped. Activate when you are ready again.';state.className='state'}finally{stop.disabled=false;await refresh()}};
+    refresh();setInterval(refresh,1000);
   </script>
 </body>
 </html>

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import sys
 import threading
 import types
+import wave
 
 import pytest
 from fastapi import HTTPException
@@ -12,6 +15,113 @@ sys.modules.setdefault(
     types.SimpleNamespace(create_connection=lambda *args, **kwargs: None),
 )
 from voice import main
+
+
+def test_audiohub_entries_normalizes_nested_payload() -> None:
+    response = {
+        "data": {
+            "data": json.dumps(
+                {
+                    "audio_list": [
+                        {
+                            "CUSTOM_NAME": main.THERMAL_BEEP_NAME,
+                            "UNIQUE_ID": "beep-uuid",
+                        }
+                    ]
+                }
+            )
+        }
+    }
+
+    records = main._audiohub_entries(response)
+
+    assert main._thermal_beep_id(records) == "beep-uuid"
+
+
+def test_write_thermal_beep_generates_three_pulse_wav(tmp_path) -> None:
+    path = tmp_path / "beep.wav"
+
+    main._write_thermal_beep(str(path))
+
+    with wave.open(str(path), "rb") as stream:
+        assert stream.getnchannels() == 1
+        assert stream.getsampwidth() == 2
+        assert stream.getframerate() == 44_100
+        assert 0.60 <= stream.getnframes() / stream.getframerate() <= 0.70
+
+
+@pytest.mark.asyncio
+async def test_thermal_beep_uploads_once_then_plays(monkeypatch, tmp_path) -> None:
+    class FakeAudioHub:
+        def __init__(self) -> None:
+            self.records: list[dict[str, str]] = []
+            self.uploads = 0
+            self.played: list[str] = []
+
+        async def get_audio_list(self):
+            return {"data": {"data": json.dumps({"audio_list": self.records})}}
+
+        async def upload_audio_file(self, path: str):
+            assert Path(path).is_file()
+            self.uploads += 1
+            self.records.append(
+                {
+                    "CUSTOM_NAME": main.THERMAL_BEEP_NAME,
+                    "UNIQUE_ID": "beep-uuid",
+                }
+            )
+
+        async def play_by_uuid(self, unique_id: str):
+            self.played.append(unique_id)
+
+    hub = FakeAudioHub()
+    monkeypatch.setattr(main, "audiohub_ref", hub)
+    monkeypatch.setattr(main, "thermal_beep_uuid", None)
+    monkeypatch.setattr(main, "THERMAL_BEEP_PATH", str(tmp_path / "beep.wav"))
+
+    assert await main._play_thermal_beep_async() == "beep-uuid"
+    assert await main._play_thermal_beep_async() == "beep-uuid"
+    assert hub.uploads == 1
+    assert hub.played == ["beep-uuid", "beep-uuid"]
+
+
+@pytest.mark.asyncio
+async def test_low_battery_announcement_uploads_once_then_plays(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeAudioHub:
+        def __init__(self) -> None:
+            self.records: list[dict[str, str]] = []
+            self.uploads = 0
+            self.played: list[str] = []
+
+        async def get_audio_list(self):
+            return {"data": {"data": json.dumps({"audio_list": self.records})}}
+
+        async def upload_audio_file(self, path: str):
+            assert Path(path).is_file()
+            self.uploads += 1
+            self.records.append(
+                {
+                    "CUSTOM_NAME": main.LOW_BATTERY_NAME,
+                    "UNIQUE_ID": "low-battery-uuid",
+                }
+            )
+
+        async def play_by_uuid(self, unique_id: str):
+            self.played.append(unique_id)
+
+    path = tmp_path / "woof_low_battery.wav"
+    path.write_bytes(b"RIFF-test-audio")
+    hub = FakeAudioHub()
+    monkeypatch.setattr(main, "audiohub_ref", hub)
+    monkeypatch.setattr(main, "low_battery_uuid", None)
+    monkeypatch.setattr(main, "LOW_BATTERY_PATH", str(path))
+
+    assert await main._play_low_battery_async() == "low-battery-uuid"
+    assert await main._play_low_battery_async() == "low-battery-uuid"
+    assert hub.uploads == 1
+    assert hub.played == ["low-battery-uuid", "low-battery-uuid"]
 
 
 def _fresh_voice_state(monkeypatch) -> main.VoiceState:

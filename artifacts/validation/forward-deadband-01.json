@@ -1,0 +1,36 @@
+{
+  "test_id": "MOTION-DEADBAND-001",
+  "status": "completed",
+  "result": "passed",
+  "completed_local_date": "2026-07-31",
+  "device": "Woof",
+  "direction": "forward",
+  "command_interface": "Unitree ObstaclesAvoidClient remote command",
+  "pulse_duration_s": 0.4,
+  "trials": [
+    {
+      "amount_mps": 0.25,
+      "movement_observed": false
+    },
+    {
+      "amount_mps": 0.5,
+      "movement_observed": true
+    },
+    {
+      "amount_mps": 1.0,
+      "movement_observed": true
+    }
+  ],
+  "minimum_observed_movement_command_mps": 0.5,
+  "operator_conclusion": "0.5 m/s is the smallest movement signal Woof can reliably receive through this command path.",
+  "scope_note": "This result applies to the factory avoidance remote-command path and does not yet qualify the direct SportClient Nav2 handoff.",
+  "final_state": {
+    "stage_ready": true,
+    "armed": false,
+    "motion_owner": null,
+    "forward_mps": 0.0,
+    "yaw_rps": 0.0,
+    "stop_reason": "forward_calibration_complete"
+  },
+  "snapshot": "forward-deadband-01.jpg"
+}

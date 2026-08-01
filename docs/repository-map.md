@@ -11,9 +11,9 @@ for return-home and camera-stability work.
 | Face the person | No mission phase or person detector does this. The round begins from whichever pose Woof already has when Home is captured. | Implement an explicit person-facing/alignment phase, or define this as an operator setup requirement. |
 | Hear “go to pear” | `voice/commands.py` accepts a small allowlist; `voice/main.py` calls `POST /api/voice/mission`. The UI can submit the same typed fruit command. | Speech currently accepts bare fruit names and `Find ...`; the desired phrase and interaction should be specified and tested explicitly. |
 | Turn toward the fruit | `CollieRuntime._run_measured_turn()` commands a bounded yaw and verifies it with fresh Go2 odometry. | This path exists and has simulation tests, but still needs a repeatable hardware acceptance run. |
-| Find and approach the fruit | `_search_for_memory()`, `_wait_for_demo_go()`, `_start_memory_approach()`, and `_monitor_memory_approach()` use fresh YOLO detections and the guarded motion adapter. | Camera stalls can invalidate the target or abort the mission before/during this stage. |
+| Find and approach the fruit | `_search_for_memory()`, `_wait_for_demo_go()`, `_start_memory_approach()`, and `_monitor_memory_approach()` use fresh YOLO detections and the guarded motion adapter. After repeated near-fruit evidence, loss through the lower camera edge triggers one 1.0 m/s, 0.4-second final push. | The fixed off-screen push still needs a guarded hardware acceptance run. A visible near fruit does not trigger it, and camera stalls remain fail-closed. |
 | Sit and bark | `_rest_at_target()` uses Unitree `StandDown`, holds for five seconds, then uses `StandUp` and `BalanceStand`. The voice mission monitor barks when rest status becomes `holding`. | Bark is coordinated by the voice service rather than the core mission, so loss of that service can produce a silent rest without aborting motion safety. |
-| Turn around and return to start | `_return_home()` captures Home before the outbound turn, reorients toward it, drives to the saved pose, and restores the saved heading. It supports `local_odometry` and `nav2`. | The code exists, but the default image selects `nav2` while the root `wendy.json` does not launch the separate `nav2/wendy.json` app. A root-only deployment therefore cannot complete the default return path. Neither backend is yet documented as hardware-qualified for this exact full routine. |
+| Turn around and return to start | `_return_home()` captures Home before the outbound turn, reorients toward it, drives to the saved pose, and restores the saved heading. It supports `local_odometry` and `nav2`. The Nav2 controller now counts 3° of rotation as progress and gets a recovery attempt before the gateway's outer stall guard. | Nav2 is deployed separately through `nav2/wendy.json`. Its return path is not yet hardware-qualified; the next run must verify that the new progress/recovery timing resolves the observed turn-then-stall failure. |
 
 ## Active runtime boundary
 
@@ -66,7 +66,12 @@ display lag.
 - `src/collie_demo/`: core state machine, camera adapters, detector, safety
   boundary, pointing experiment, and both return clients.
 - `voice/`: deployed voice/WebRTC/camera-broker service.
-- `web/`: deployed operator UI.
+- `web/index.html`: minimal audience-facing Activate Demo and Stop UI.
+- `web/debug.html`: detailed stage controls, telemetry, and exportable demo-run
+  history.
+- `web/tests/`: reusable mini-test UIs for factory-path motion, direct Nav2
+  motion, and read-only fruit detection. Add future isolated test surfaces
+  here rather than expanding the main page.
 - `nav2/`: separately deployed mapped-return companion.
 - `thor-audio/`: optional desk-side microphone/speaker companion referenced by
   the voice service; it is not part of the root Woof deployment.
@@ -78,6 +83,22 @@ display lag.
 The local webcam/UI entry points and the pointing diagnostics are not part of
 the autonomous stage path, but they remain documented operator/development
 tools and should not be deleted as dead runtime code.
+
+## Measured motion constraint
+
+`MOTION-DEADBAND-001` found that 0.25 m/s produced no physical forward movement
+while 0.50 m/s and 1.00 m/s did move Woof when sent as 0.4-second pulses through
+the factory `ObstaclesAvoidClient` remote-command interface. The durable
+working value for that interface is therefore **0.50 m/s minimum reliable
+forward command**.
+
+This explains why a controller can report successful command heartbeats while
+making no useful progress at small velocities. Direct `SportClient`
+calibration subsequently confirmed physical steps at 0.25 and 0.50 m/s. Nav2
+now uses 0.25 m/s as a provisional positive command floor in both its
+controller tuning and gateway relay. Explicit zero, stale, reverse, and
+rotation-only commands are not raised. Lower direct values still need to be
+measured before treating 0.25 m/s as the exact boundary.
 
 ## Cleanup completed in the first pass
 
@@ -99,5 +120,8 @@ tools and should not be deleted as dead runtime code.
    enough to identify the first stale boundary.
 3. Add a hardware acceptance checklist for Home capture, departure turn,
    forward return, final heading, stop behavior, and camera reconnect.
-4. Only after those measurements, adjust the return controller or camera
-   ownership/reconnect policy.
+4. Deploy the pose-aware progress checker and persistent path/command trace,
+   then re-run return-home with the provisional 0.25 m/s direct-path floor.
+   Verify the 10 cm, 5-degree, and disarmed final gates.
+5. Complete lower-value direct calibration, then decide whether 0.25 m/s
+   remains the durable floor or should be reduced.

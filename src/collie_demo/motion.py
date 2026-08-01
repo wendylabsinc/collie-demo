@@ -57,6 +57,7 @@ class AvoidanceClientProtocol(Protocol):
 @dataclass(frozen=True, slots=True)
 class MotionConfig:
     maximum_forward_mps: float = 0.08
+    maximum_final_push_mps: float = 1.0
     maximum_yaw_rps: float = 0.25
     command_watchdog_s: float = 0.35
     rpc_timeout_s: float = 0.75
@@ -116,6 +117,9 @@ class UnitreeMotionAdapter:
             "watchdog_s": self.config.command_watchdog_s,
             "limits": {
                 "forward_mps": self.config.maximum_forward_mps,
+                "final_push_forward_mps": (
+                    self.config.maximum_final_push_mps
+                ),
                 "yaw_rps": self.config.maximum_yaw_rps,
                 "lateral_mps": 0.0,
             },
@@ -367,6 +371,30 @@ class UnitreeMotionAdapter:
     async def send(self, lease: str, command: VelocityCommand) -> VelocityCommand:
         forward = self._bounded_forward(command.forward_mps)
         yaw = self._bounded_yaw(command.yaw_rps)
+        return await self._send_avoidance(lease, forward, yaw, command.reason)
+
+    async def send_unbounded_forward_calibration(
+        self,
+        lease: str,
+        forward_mps: float,
+        reason: str = "forward_calibration",
+    ) -> VelocityCommand:
+        """Send the exact non-negative calibration speed without app clamping."""
+
+        forward = float(forward_mps)
+        if not math.isfinite(forward) or forward < 0.0:
+            raise ValueError(
+                "forward calibration speed must be finite and non-negative"
+            )
+        return await self._send_avoidance(lease, forward, 0.0, reason)
+
+    async def _send_avoidance(
+        self,
+        lease: str,
+        forward: float,
+        yaw: float,
+        reason: str,
+    ) -> VelocityCommand:
         async with self._lock:
             self._require_owner(lease, required_mode="avoidance")
             # A fresh command has arrived. Do not let the previous command's
@@ -381,7 +409,7 @@ class UnitreeMotionAdapter:
                 self._fault = f"velocity command failed: {exc}"
                 await self._release_locked(use_stop=True)
                 raise MotionNotReady(self._fault) from exc
-            self._last_command = VelocityCommand(forward, yaw, command.reason)
+            self._last_command = VelocityCommand(forward, yaw, reason)
             if forward != 0.0 or yaw != 0.0:
                 self._arm_watchdog()
             else:
@@ -434,6 +462,81 @@ class UnitreeMotionAdapter:
                 forward, yaw, command.reason
             )
             if forward != 0.0 or yaw != 0.0:
+                self._arm_watchdog()
+            else:
+                self._cancel_watchdog()
+            return self._last_command
+
+    async def send_direct_final_push(
+        self,
+        lease: str,
+        forward_mps: float,
+        reason: str = "fruit_offscreen_final_push",
+    ) -> VelocityCommand:
+        """Send the isolated, watchdog-protected final fruit push."""
+
+        forward = self._bounded_final_push(forward_mps)
+        async with self._lock:
+            self._require_owner(lease, required_mode="direct_navigation")
+            self._cancel_watchdog()
+            try:
+                await self._success(self.sport.Move, forward, 0.0, 0.0)
+            except Exception as exc:
+                self._fault = f"direct final push failed: {exc}"
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(self._fault) from exc
+            self._last_command = VelocityCommand(forward, 0.0, reason)
+            if forward != 0.0:
+                self._arm_watchdog()
+            else:
+                self._cancel_watchdog()
+            return self._last_command
+
+    async def send_avoidance_final_push(
+        self,
+        lease: str,
+        forward_mps: float,
+        reason: str = "fruit_offscreen_final_push",
+    ) -> VelocityCommand:
+        """Send the same isolated push through the local fallback lease."""
+
+        return await self._send_avoidance(
+            lease,
+            self._bounded_final_push(forward_mps),
+            0.0,
+            reason,
+        )
+
+    async def send_unbounded_direct_forward_calibration(
+        self,
+        lease: str,
+        forward_mps: float,
+        reason: str = "nav2_forward_calibration",
+    ) -> VelocityCommand:
+        """Send an exact forward calibration speed through SportClient.
+
+        This calibration-only entry point intentionally bypasses the app's
+        normal direct-navigation clamp. Production Nav2 commands continue to
+        use ``send_direct_navigation`` and its configured limits.
+        """
+
+        forward = float(forward_mps)
+        if not math.isfinite(forward) or forward < 0.0:
+            raise ValueError(
+                "direct forward calibration speed must be finite and "
+                "non-negative"
+            )
+        async with self._lock:
+            self._require_owner(lease, required_mode="direct_navigation")
+            self._cancel_watchdog()
+            try:
+                await self._success(self.sport.Move, forward, 0.0, 0.0)
+            except Exception as exc:
+                self._fault = f"direct calibration command failed: {exc}"
+                await self._release_locked(use_stop=True)
+                raise MotionNotReady(self._fault) from exc
+            self._last_command = VelocityCommand(forward, 0.0, reason)
+            if forward != 0.0:
                 self._arm_watchdog()
             else:
                 self._cancel_watchdog()
@@ -613,6 +716,18 @@ class UnitreeMotionAdapter:
         if not math.isfinite(number) or number < 0.0:
             raise ValueError("forward speed must be finite and non-negative")
         return min(number, self.config.maximum_forward_mps)
+
+    def _bounded_final_push(self, value: float) -> float:
+        number = float(value)
+        if not math.isfinite(number) or number < 0.0:
+            raise ValueError(
+                "final push speed must be finite and non-negative"
+            )
+        if number > self.config.maximum_final_push_mps:
+            raise ValueError(
+                "final push speed exceeds its isolated configured limit"
+            )
+        return number
 
     def _bounded_yaw(self, value: float) -> float:
         number = float(value)

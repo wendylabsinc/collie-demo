@@ -94,6 +94,43 @@ def test_motion_uses_avoidance_and_clamps_forward_speed() -> None:
     asyncio.run(scenario())
 
 
+def test_forward_calibration_bypasses_app_speed_clamp() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(sport, avoidance)
+        await motion.initialize()
+        lease = await motion.arm()
+        sent = await motion.send_unbounded_forward_calibration(lease, 1.0)
+        assert sent.forward_mps == 1.0
+        assert avoidance.moves[-1] == (1.0, 0.0, 0.0)
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_direct_forward_calibration_bypasses_app_speed_clamp() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(
+            sport,
+            avoidance,
+            MotionConfig(maximum_forward_mps=0.12),
+        )
+        await motion.initialize()
+        lease = await motion.arm_direct_navigation()
+
+        sent = await motion.send_unbounded_direct_forward_calibration(
+            lease, 1.0
+        )
+
+        assert sent.forward_mps == 1.0
+        assert sport.moves[-1] == (1.0, 0.0, 0.0)
+        assert avoidance.moves == []
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
 def test_general_navigation_still_rejects_reverse() -> None:
     async def scenario() -> None:
         sport, avoidance = FakeSport(), FakeAvoidance()
@@ -316,6 +353,38 @@ def test_direct_navigation_rejects_reverse_before_hardware_command() -> None:
         else:
             raise AssertionError("direct Nav2 lease accepted reverse motion")
         assert sport.moves == []
+        await motion.close()
+
+    asyncio.run(scenario())
+
+
+def test_direct_final_push_is_exact_without_widening_navigation_limit() -> None:
+    async def scenario() -> None:
+        sport, avoidance = FakeSport(), FakeAvoidance()
+        motion = UnitreeMotionAdapter(
+            sport,
+            avoidance,
+            MotionConfig(
+                maximum_forward_mps=0.30,
+                maximum_final_push_mps=1.0,
+            ),
+        )
+        await motion.initialize()
+        lease = await motion.arm_direct_navigation()
+
+        normal = await motion.send_direct_navigation(
+            lease, VelocityCommand(1.0, 0.0, "normal_nav")
+        )
+        pushed = await motion.send_direct_final_push(lease, 1.0)
+
+        assert normal.forward_mps == 0.30
+        assert pushed.forward_mps == 1.0
+        assert sport.moves[-2:] == [
+            (0.30, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+        ]
+        await motion.release(lease)
+        assert sport.current_move == (0.0, 0.0, 0.0)
         await motion.close()
 
     asyncio.run(scenario())

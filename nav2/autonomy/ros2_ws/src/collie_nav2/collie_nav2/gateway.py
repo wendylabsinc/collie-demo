@@ -19,7 +19,7 @@ from action_msgs.msg import GoalStatus
 from fastapi import FastAPI, HTTPException
 import httpx
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from pydantic import BaseModel, Field
 import rclpy
 from rclpy.action import ActionClient
@@ -33,6 +33,8 @@ from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
 from tf2_ros import Buffer, TransformException, TransformListener
 import uvicorn
+
+from collie_nav2.command_shaping import apply_measured_motion_floors
 
 
 def normalize_angle(value: float) -> float:
@@ -75,12 +77,19 @@ class CollieNav2Gateway(Node):
     # cancels the goal and revokes navigation ownership.
     COMMAND_TRANSITION_GRACE_S = 3.0
     COMMAND_START_GRACE_S = 1.50
-    STALL_TIMEOUT_S = 6.0
+    # Nav2's pose progress checker fails a stalled controller attempt at 5 s.
+    # Keep this outer guard later so its recovery tree gets a bounded chance
+    # to clear costmaps or begin another motion before we cancel the goal.
+    STALL_TIMEOUT_S = 8.0
     STALL_PROGRESS_M = 0.04
     STALL_HEADING_PROGRESS_RAD = math.radians(3.0)
     ROTATION_ONLY_TIMEOUT_S = 12.0
     MAX_HOME_DISTANCE_M = 3.0
     MAX_FORWARD_MPS = 0.30
+    # NAV2-DEADBAND-001: operator-observed direct SportClient pulses moved at
+    # 0.25 and 0.50 m/s. Use the lowest confirmed working value as the
+    # physical command floor while leaving zero/rotation-only commands alone.
+    MIN_FORWARD_MPS = 0.25
     MAX_YAW_RPS = 0.50
     MIN_ROTATION_YAW_RPS = 0.35
 
@@ -151,6 +160,18 @@ class CollieNav2Gateway(Node):
         self._heading_tolerance_rad = math.radians(5.0)
         self._goal_handle = None
         self._latest_cmd: tuple[float, float, float, float] | None = None
+        self._last_relay: dict[str, Any] | None = None
+        self._command_counts = {
+            "received": 0,
+            "relay_attempts": 0,
+            "forward_attempts": 0,
+            "zero_attempts": 0,
+            "boosted_forward_attempts": 0,
+            "stale_zero_attempts": 0,
+        }
+        self._command_trace: deque[dict[str, Any]] = deque(maxlen=80)
+        self._last_command_trace_at: float | None = None
+        self._plan: dict[str, Any] | None = None
         self._nav2_active = False
         self._nav2_state_request = None
 
@@ -170,6 +191,7 @@ class CollieNav2Gateway(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(OccupancyGrid, "/map", self._on_map, 10)
+        self.create_subscription(Path, "/plan", self._on_plan, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 20)
         self.create_timer(0.05, self._update_pose)
         self.create_timer(0.25, self._update_nav2_state)
@@ -202,6 +224,35 @@ class CollieNav2Gateway(Node):
             self._map_at = time.monotonic()
             self._map_cells = int(msg.info.width) * int(msg.info.height)
 
+    def _on_plan(self, msg: Path) -> None:
+        points = [
+            (float(pose.pose.position.x), float(pose.pose.position.y))
+            for pose in msg.poses
+        ]
+        length_m = sum(
+            math.hypot(second[0] - first[0], second[1] - first[1])
+            for first, second in zip(points, points[1:])
+        )
+        with self._lock:
+            self._plan = {
+                "received_at": time.monotonic(),
+                "frame_id": str(msg.header.frame_id),
+                "pose_count": len(points),
+                "length_m": round(length_m, 4),
+                "start": None
+                if not points
+                else {
+                    "x_m": round(points[0][0], 4),
+                    "y_m": round(points[0][1], 4),
+                },
+                "end": None
+                if not points
+                else {
+                    "x_m": round(points[-1][0], 4),
+                    "y_m": round(points[-1][1], 4),
+                },
+            }
+
     def _on_cmd_vel(self, msg: Twist) -> None:
         now = time.monotonic()
         command = (
@@ -212,6 +263,7 @@ class CollieNav2Gateway(Node):
         )
         with self._lock:
             self._latest_cmd = command
+            self._command_counts["received"] += 1
 
     def _update_pose(self) -> None:
         try:
@@ -350,6 +402,31 @@ class CollieNav2Gateway(Node):
             navigation = dict(self._navigation)
             motion = dict(self._motion)
             pose = self._pose
+            latest_cmd = self._latest_cmd
+            last_relay = (
+                None if self._last_relay is None else dict(self._last_relay)
+            )
+            command_counts = dict(self._command_counts)
+            command_trace = list(self._command_trace)
+            plan = None if self._plan is None else dict(self._plan)
+            last_progress_at = self._last_progress_at
+            last_linear_progress_at = self._last_linear_progress_at
+        navigation["progress_age_s"] = (
+            None
+            if last_progress_at is None
+            else round(now - last_progress_at, 3)
+        )
+        navigation["linear_progress_age_s"] = (
+            None
+            if last_linear_progress_at is None
+            else round(now - last_linear_progress_at, 3)
+        )
+        if last_relay is not None:
+            relayed_at = float(last_relay.pop("relayed_at"))
+            last_relay["age_s"] = round(now - relayed_at, 3)
+        if plan is not None:
+            received_at = float(plan.pop("received_at"))
+            plan["age_s"] = round(now - received_at, 3)
         return {
             "ok": True,
             "ready": health["ready"],
@@ -367,6 +444,20 @@ class CollieNav2Gateway(Node):
             },
             "navigation": navigation,
             "motion": motion,
+            "command_diagnostics": {
+                "raw_cmd_vel": None
+                if latest_cmd is None
+                else {
+                    "forward_mps": round(latest_cmd[0], 4),
+                    "lateral_mps": round(latest_cmd[1], 4),
+                    "yaw_rps": round(latest_cmd[2], 4),
+                    "age_s": round(now - latest_cmd[3], 3),
+                },
+                "last_relay": last_relay,
+                "counts": command_counts,
+                "trace": command_trace,
+            },
+            "global_plan": plan,
         }
 
     async def capture_home(self, request: CaptureRequest) -> dict[str, Any]:
@@ -543,6 +634,13 @@ class CollieNav2Gateway(Node):
                 request.heading_tolerance_deg
             )
             self._latest_cmd = None
+            self._last_relay = None
+            self._command_counts = {
+                name: 0 for name in self._command_counts
+            }
+            self._command_trace.clear()
+            self._last_command_trace_at = None
+            self._plan = None
             self._navigation = {
                 "state": "starting",
                 "reason": "NavigateToPose goal submitted",
@@ -888,6 +986,9 @@ class CollieNav2Gateway(Node):
                         )
                     continue
                 forward, lateral, yaw, received_at = command
+                raw_forward = forward
+                raw_lateral = lateral
+                raw_yaw = yaw
                 command_age = now - received_at
                 if command_age > self.COMMAND_TRANSITION_GRACE_S:
                     self._fail_or_cancel(
@@ -902,15 +1003,21 @@ class CollieNav2Gateway(Node):
                     forward = 0.0
                     lateral = 0.0
                     yaw = 0.0
-                elif (
-                    abs(forward) <= 0.02
-                    and 0.001 < abs(yaw) < self.MIN_ROTATION_YAW_RPS
-                ):
-                    # Nav2 can request angular velocities too small to move the
-                    # physical Go2. Apply a measured minimum only to fresh,
-                    # rotation-only commands; steering corrections while
-                    # translating remain untouched.
-                    yaw = math.copysign(self.MIN_ROTATION_YAW_RPS, yaw)
+                    stale_zero = True
+                else:
+                    stale_zero = False
+                    # Apply measured floors only to fresh commands. Small
+                    # forward commands can settle posture without a step;
+                    # zero, reverse, stale, and rotation-only translation are
+                    # not promoted.
+                    forward, yaw = apply_measured_motion_floors(
+                        forward,
+                        yaw,
+                        minimum_forward_mps=self.MIN_FORWARD_MPS,
+                        minimum_rotation_yaw_rps=(
+                            self.MIN_ROTATION_YAW_RPS
+                        ),
+                    )
                 if (
                     forward < -0.001
                     or forward > self.MAX_FORWARD_MPS
@@ -922,6 +1029,45 @@ class CollieNav2Gateway(Node):
                         "Nav2 command exceeded the guarded stage envelope",
                     )
                     continue
+                boosted_forward = forward > raw_forward + 1.0e-6
+                relay = {
+                    "relayed_at": now,
+                    "raw_forward_mps": round(raw_forward, 4),
+                    "raw_lateral_mps": round(raw_lateral, 4),
+                    "raw_yaw_rps": round(raw_yaw, 4),
+                    "sent_forward_mps": round(max(0.0, forward), 4),
+                    "sent_yaw_rps": round(yaw, 4),
+                    "source_age_s": round(command_age, 4),
+                    "stale_zero": stale_zero,
+                    "boosted_forward": boosted_forward,
+                }
+                with self._lock:
+                    self._last_relay = relay
+                    self._command_counts["relay_attempts"] += 1
+                    if forward > 0.001:
+                        self._command_counts["forward_attempts"] += 1
+                    elif abs(yaw) <= 0.001:
+                        self._command_counts["zero_attempts"] += 1
+                    if boosted_forward:
+                        self._command_counts[
+                            "boosted_forward_attempts"
+                        ] += 1
+                    if stale_zero:
+                        self._command_counts["stale_zero_attempts"] += 1
+                    if (
+                        self._last_command_trace_at is None
+                        or now - self._last_command_trace_at >= 0.20
+                    ):
+                        started = self._started_at
+                        trace_item = dict(relay)
+                        trace_item.pop("relayed_at")
+                        trace_item["elapsed_s"] = (
+                            None
+                            if started is None
+                            else round(now - started, 3)
+                        )
+                        self._command_trace.append(trace_item)
+                        self._last_command_trace_at = now
                 try:
                     response = client.post(
                         f"{self._collie_url}/api/navigation/cmd",

@@ -211,7 +211,11 @@ def main() -> None:
     parser.add_argument("--confidence", type=float, default=0.5)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8097)
-    parser.add_argument("--web-file", type=Path, default=Path("web/fruit.html"))
+    parser.add_argument(
+        "--web-file",
+        type=Path,
+        default=Path("web/tests/fruit-detector.html"),
+    )
     args = parser.parse_args()
 
     detector = FruitDetector(args.model, confidence=args.confidence)
