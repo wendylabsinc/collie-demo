@@ -27,6 +27,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+DASHBOARD = Path(__file__).with_name("index.html")
+
 UNITREE_JOINT_ORDER = (
     "FR_hip_joint",
     "FR_thigh_joint",
@@ -623,6 +625,13 @@ class ThermalMonitor:
 
 def _handler(monitor: ThermalMonitor, store: Store) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
+        def _html(self, status: int, payload: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def _json(self, status: int, payload: Any) -> None:
             encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
@@ -633,7 +642,16 @@ def _handler(monitor: ThermalMonitor, store: Store) -> type[BaseHTTPRequestHandl
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             parsed = urlparse(self.path)
-            if parsed.path in {"/", "/api/status"}:
+            if parsed.path == "/":
+                try:
+                    self._html(200, DASHBOARD.read_bytes())
+                except OSError as exc:
+                    self._json(
+                        500,
+                        {"ok": False, "error": f"dashboard unavailable: {exc}"},
+                    )
+                return
+            if parsed.path == "/api/status":
                 self._json(200, monitor.status())
                 return
             if parsed.path == "/healthz":

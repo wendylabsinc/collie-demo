@@ -38,7 +38,7 @@ ENV PYTHONUNBUFFERED=1 \
     GO2_NETWORK_INTERFACE=enP8p1s0
 
 WORKDIR /app
-COPY monitor.py ./
+COPY monitor.py index.html ./
 
 EXPOSE 8102
 CMD ["python3", "monitor.py"]

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 import sqlite3
 import sys
+import threading
+from urllib.request import urlopen
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,6 +24,45 @@ def _config(**overrides: object) -> monitor.Config:
     }
     values.update(overrides)
     return monitor.Config(**values)
+
+
+def test_dashboard_uses_wendy_brand_and_is_explicitly_read_only() -> None:
+    dashboard = monitor.DASHBOARD.read_text(encoding="utf-8")
+
+    assert "WENDY" in dashboard
+    assert "#f1eee7" in dashboard
+    assert "Read-only monitor" in dashboard
+    assert "does not move, stop, or throttle Woof" in dashboard
+    assert "http://127.0.0.1:8088/" in dashboard
+
+
+def test_dashboard_and_status_api_are_served_on_separate_routes() -> None:
+    class FakeMonitor:
+        @staticmethod
+        def status() -> dict[str, object]:
+            return {"ok": True, "alert": {"level": "normal"}}
+
+    class FakeStore:
+        @staticmethod
+        def history(_limit: int) -> list[object]:
+            return []
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), monitor._handler(FakeMonitor(), FakeStore())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        with urlopen(f"{base_url}/", timeout=2) as response:
+            assert response.headers.get_content_type() == "text/html"
+            assert b"Woof Thermal Monitor" in response.read()
+        with urlopen(f"{base_url}/api/status", timeout=2) as response:
+            assert json.load(response)["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_alert_requires_sustained_warning_but_critical_is_immediate() -> None:
