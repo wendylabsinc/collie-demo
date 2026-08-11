@@ -36,6 +36,21 @@ def test_dashboard_uses_wendy_brand_and_is_explicitly_read_only() -> None:
     assert "http://127.0.0.1:8088/" in dashboard
 
 
+def test_demo_advertises_read_only_monitor() -> None:
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads((root / "wendy.json").read_text(encoding="utf-8"))
+    metadata = json.loads((root / "wendy-demo.json").read_text(encoding="utf-8"))
+
+    assert {"type": "http", "port": 8102} in manifest["entitlements"]
+    assert metadata["safety"] == "view"
+    assert metadata["links"][0] == {
+        "label": "Open monitor",
+        "port": 8102,
+        "path": "/",
+        "kind": "ui",
+    }
+
+
 def test_dashboard_and_status_api_are_served_on_separate_routes() -> None:
     class FakeMonitor:
         @staticmethod
