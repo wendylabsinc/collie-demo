@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f1eee7">
+  <title>Woof Thermal Monitor · Wendy</title>
+  <style>
+    :root{color-scheme:light;font:16px/1.45 "Geist",ui-sans-serif,system-ui,sans-serif;--cream:#f1eee7;--paper:#faf8f3;--slate:#171c23;--muted:#676660;--line:#d4d1c9;--seafoam:#9fe2bf;--green:#2a7050;--danger:#a63c2d;--amber:#d68b2b}*{box-sizing:border-box}body{background:var(--cream);color:var(--slate);margin:0;min-height:100dvh}main{margin:auto;max-width:1180px;padding:0 max(24px,env(safe-area-inset-right)) max(40px,env(safe-area-inset-bottom)) max(24px,env(safe-area-inset-left))}.topbar{align-items:center;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;min-height:76px}.brand{align-items:center;display:flex;font-size:17px;font-weight:750;gap:12px;letter-spacing:.09em}.mark{height:30px;position:relative;transform:rotate(45deg);width:30px}.mark:before{border:6px solid var(--slate);content:"";inset:0;position:absolute}.mark:after{background:var(--slate);content:"";height:19px;left:16px;position:absolute;top:-5px;width:19px}.home{align-items:center;border:1px solid var(--line);color:var(--slate);display:inline-flex;font-weight:750;min-height:48px;padding:0 15px;text-decoration:none}.hero{align-items:end;display:flex;gap:32px;justify-content:space-between;padding:38px 0 28px}.eyebrow{color:var(--green);font:700 11px ui-monospace,SFMono-Regular,monospace;letter-spacing:.15em;margin:0 0 9px;text-transform:uppercase}h1{font-size:clamp(42px,7vw,78px);font-weight:520;letter-spacing:-.06em;line-height:.92;margin:0}.safety{border-left:4px solid var(--seafoam);color:var(--muted);font-size:14px;margin:0;max-width:320px;padding:12px 0 12px 16px}.safety strong{color:var(--slate);display:block;font-size:15px}.grid{display:grid;gap:14px;grid-template-columns:repeat(4,minmax(0,1fr))}.card{background:var(--paper);border:1px solid var(--line);min-height:145px;padding:18px}.card.wide{grid-column:span 2}.label{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}.value{font-size:clamp(28px,4vw,46px);font-weight:560;letter-spacing:-.045em;line-height:1.05;margin-top:16px}.detail{color:var(--muted);font-size:13px;margin-top:8px}.status{border-top:5px solid var(--seafoam)}.status.warning{border-color:var(--amber)}.status.critical,.status.sensor_error{border-color:var(--danger)}.table-card{background:var(--paper);border:1px solid var(--line);grid-column:1/-1;padding:18px}h2{font-size:18px;margin:0 0 16px}.readings{display:grid;gap:1px;grid-template-columns:repeat(3,minmax(0,1fr));background:var(--line);border:1px solid var(--line)}.reading{align-items:center;background:var(--paper);display:flex;justify-content:space-between;min-height:48px;padding:10px 12px}.reading span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.reading strong{font-variant-numeric:tabular-nums}.empty{color:var(--muted);grid-column:1/-1;padding:16px;background:var(--paper)}.error{background:#f4d9d3;border:1px solid #d4978b;color:#70271e;display:none;margin-bottom:14px;padding:14px}.error.visible{display:block}.footer{color:var(--muted);display:flex;font-size:12px;justify-content:space-between;margin-top:18px}@media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.readings{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:620px){main{padding-inline:max(12px,env(safe-area-inset-left))}.topbar{min-height:64px}.brand{font-size:15px}.hero{align-items:start;flex-direction:column;gap:20px;padding:30px 0 20px}.safety{max-width:none}.grid{grid-template-columns:1fr}.card.wide{grid-column:auto}.readings{grid-template-columns:1fr}.footer{flex-direction:column;gap:5px}}
+  </style>
+</head>
+<body><main>
+  <header class="topbar">
+    <div class="brand"><span class="mark" aria-hidden="true"></span><span>WENDY</span></div>
+    <a class="home" href="http://127.0.0.1:8088/">← Home</a>
+  </header>
+  <section class="hero">
+    <div><p class="eyebrow">Woof · live telemetry</p><h1>Thermal monitor</h1></div>
+    <p class="safety"><strong>Read-only monitor</strong>This page does not move, stop, or throttle Woof.</p>
+  </section>
+  <div id="error" class="error" role="alert"></div>
+  <section class="grid" aria-live="polite">
+    <article id="alertCard" class="card status"><div class="label">Alert state</div><div id="alert" class="value">Loading</div><div id="reason" class="detail">Waiting for telemetry…</div></article>
+    <article class="card"><div class="label">Hottest monitored</div><div id="hottest" class="value">—</div><div id="hottestName" class="detail">Jetson or Go2 IMU</div></article>
+    <article class="card"><div class="label">Hottest Jetson zone</div><div id="jetson" class="value">—</div><div id="jetsonName" class="detail">No sample yet</div></article>
+    <article class="card"><div class="label">Battery</div><div id="battery" class="value">—</div><div id="batteryState" class="detail">Waiting for Go2 telemetry</div></article>
+    <article class="table-card"><h2>Temperature readings</h2><div id="readings" class="readings"><div class="empty">Waiting for the first sample…</div></div></article>
+  </section>
+  <footer class="footer"><span>Refreshes every 2 seconds</span><span id="updated">Not updated yet</span></footer>
+</main>
+<script>
+const $=selector=>document.querySelector(selector);
+const temperature=value=>Number.isFinite(Number(value))?`${Number(value).toFixed(1)}°C`:'—';
+function addReading(container,name,value){const row=document.createElement('div');row.className='reading';const label=document.createElement('span');label.textContent=name;const number=document.createElement('strong');number.textContent=temperature(value);row.append(label,number);container.append(row)}
+function render(data){
+  const alert=data.alert||{};const level=alert.level||'sensor_error';
+  $('#alertCard').className=`card status ${level}`;$('#alert').textContent=level.replaceAll('_',' ');$('#reason').textContent=alert.reason||data.error||'Thresholds are clear.';
+  $('#hottest').textContent=temperature(data.hottest_monitored_c);$('#hottestName').textContent=data.hottest_monitored_sensor||'Jetson or Go2 IMU';
+  $('#jetson').textContent=temperature(data.hottest_jetson_c);$('#jetsonName').textContent=data.hottest_jetson_zone||'No Jetson sample';
+  const go2=data.go2||{};$('#battery').textContent=Number.isFinite(Number(go2.battery_soc_percent))?`${go2.battery_soc_percent}%`:'—';$('#batteryState').textContent=data.battery_alert?.reason||data.go2_error||'Battery telemetry online';
+  const readings=$('#readings');readings.replaceChildren();Object.entries(data.jetson_c||{}).sort().forEach(([name,value])=>addReading(readings,`Jetson · ${name}`,value));
+  if(Number.isFinite(Number(go2.imu_c)))addReading(readings,'Go2 · IMU',go2.imu_c);Object.entries(go2.motor_c||{}).sort().forEach(([name,value])=>addReading(readings,`Motor · ${name}`,value));
+  if(!readings.children.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No temperature readings available.';readings.append(empty)}
+  $('#updated').textContent=data.captured_at?`Updated ${new Date(data.captured_at).toLocaleTimeString()}`:'Not updated yet';$('#error').classList.remove('visible');
+}
+async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});const data=await response.json();render(data);if(!response.ok)throw new Error(data.error||`Status ${response.status}`)}catch(error){$('#error').textContent=`Monitor unavailable: ${error.message}`;$('#error').classList.add('visible')}}
+refresh();setInterval(refresh,2000);
+</script></body></html>

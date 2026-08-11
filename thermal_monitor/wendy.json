@@ -7,6 +7,10 @@
       "mode": "host"
     },
     {
+      "type": "http",
+      "port": 8102
+    },
+    {
       "type": "persist",
       "name": "woof-thermal-monitor-state",
       "path": "/state"

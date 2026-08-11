@@ -1,0 +1,14 @@
+{
+  "title": "Woof Thermal Monitor",
+  "description": "Read-only Jetson, motor, battery, and alert monitoring for Woof.",
+  "category": "Monitoring",
+  "safety": "view",
+  "links": [
+    {
+      "label": "Open monitor",
+      "port": 8102,
+      "path": "/",
+      "kind": "ui"
+    }
+  ]
+}
