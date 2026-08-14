@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import sqlite3
 import sys
+import threading
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -69,6 +71,159 @@ def test_battery_alert_retries_failed_announcement() -> None:
     alert.record_result(False)
     assert alert.update(24, 59.9)[:2] == ("low", False)
     assert alert.update(24, 60.0)[:2] == ("low", True)
+
+
+def test_go2_telemetry_retries_failed_dds_initialization_without_restart(
+    monkeypatch,
+) -> None:
+    telemetry = monitor.Go2Telemetry("enP8p1s0", reconnect_s=0.01)
+    connected = threading.Event()
+    attempts = 0
+
+    def connect_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("interface is not ready")
+        connected.set()
+
+    monkeypatch.setattr(telemetry, "_connect_once", connect_once)
+
+    telemetry.start()
+    try:
+        assert connected.wait(0.5)
+        assert attempts == 3
+        assert telemetry.connection_status()["connected"] is True
+        assert telemetry.connection_status()["attempts"] == 3
+    finally:
+        telemetry.stop()
+
+
+def test_motor_alert_warns_on_sustained_rapid_rise() -> None:
+    alert = monitor.MotorAlertController(_config())
+
+    first = alert.update({"FR_thigh_joint": 50.0}, 0.0)
+    rising = alert.update({"FR_thigh_joint": 61.0}, 120.0)
+    warned = alert.update({"FR_thigh_joint": 62.0}, 130.0)
+
+    assert first["level"] == "normal"
+    assert rising["level"] == "normal"
+    assert rising["fastest_rise_c_per_min"] == 5.5
+    assert warned["level"] == "warning"
+    assert warned["should_beep"] is True
+    assert "rose 12.0 C" in warned["reason"]
+
+
+def test_motor_alert_warns_at_absolute_limit_and_critical_is_immediate() -> None:
+    alert = monitor.MotorAlertController(_config())
+
+    assert alert.update({"RR_hip_joint": 70.0}, 0.0)["level"] == "normal"
+    warning = alert.update({"RR_hip_joint": 71.0}, 10.0)
+    critical = alert.update({"RR_hip_joint": 80.0}, 11.0)
+
+    assert warning["level"] == "warning"
+    assert warning["should_beep"] is True
+    assert critical["level"] == "critical"
+    assert critical["should_beep"] is True
+    assert critical["hottest_motor"] == "RR_hip_joint"
+
+
+def test_alarm_falls_back_to_direct_go2_audio(monkeypatch) -> None:
+    class FakeGo2:
+        @staticmethod
+        def snapshot():
+            return None, ""
+
+    class FakeDirectAudio:
+        calls: list[tuple[str, str]] = []
+
+        def play(self, name: str, path: str) -> str:
+            self.calls.append((name, path))
+            return "audio-id"
+
+    def unavailable(*args, **kwargs):
+        raise monitor.URLError("voice service stopped")
+
+    monkeypatch.setattr(monitor, "urlopen", unavailable)
+    direct_audio = FakeDirectAudio()
+    service = monitor.ThermalMonitor(
+        _config(direct_audio_enabled=True),
+        store=object(),
+        go2=FakeGo2(),
+        direct_audio=direct_audio,
+    )
+
+    assert service._beep() == (True, "")
+    assert direct_audio.calls == [
+        (monitor.THERMAL_BEEP_NAME, monitor.THERMAL_BEEP_PATH)
+    ]
+
+
+def test_low_battery_falls_back_to_direct_go2_audio(monkeypatch) -> None:
+    class FakeGo2:
+        @staticmethod
+        def snapshot():
+            return None, ""
+
+    class FakeDirectAudio:
+        calls: list[tuple[str, str]] = []
+
+        def play(self, name: str, path: str) -> str:
+            self.calls.append((name, path))
+            return "audio-id"
+
+    def unavailable(*args, **kwargs):
+        raise monitor.URLError("voice service stopped")
+
+    monkeypatch.setattr(monitor, "urlopen", unavailable)
+    direct_audio = FakeDirectAudio()
+    service = monitor.ThermalMonitor(
+        _config(direct_audio_enabled=True),
+        store=object(),
+        go2=FakeGo2(),
+        direct_audio=direct_audio,
+    )
+
+    assert service._announce_low_battery() == (True, "")
+    assert direct_audio.calls == [
+        (monitor.LOW_BATTERY_NAME, monitor.LOW_BATTERY_PATH)
+    ]
+
+
+def test_direct_audio_retries_transient_webrtc_failure(monkeypatch) -> None:
+    direct_audio = monitor.DirectGo2Audio("192.0.2.1")
+    attempts = 0
+
+    async def flaky(name: str, path: str) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("rate limited")
+        return "audio-id"
+
+    async def no_delay(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(direct_audio, "_play_once", flaky)
+    monkeypatch.setattr(monitor.asyncio, "sleep", no_delay)
+
+    result = asyncio.run(direct_audio._play_async("alarm", "/tmp/alarm.wav"))
+
+    assert result == "audio-id"
+    assert attempts == 3
+
+
+def test_direct_audio_holds_connection_for_wave_duration(tmp_path: Path) -> None:
+    audio_path = tmp_path / "alarm.wav"
+    with monitor.wave.open(str(audio_path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(8_000)
+        stream.writeframes(b"\x00\x00" * 2_000)
+
+    hold_s = monitor._audio_playback_hold_s(str(audio_path))
+
+    assert abs(hold_s - 1.25) < 0.001
 
 
 def test_read_jetson_temperatures_reads_all_zones(tmp_path: Path) -> None:

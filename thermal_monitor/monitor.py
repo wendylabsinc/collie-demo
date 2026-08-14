@@ -3,22 +3,26 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+import asyncio
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from glob import glob
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sqlite3
+import struct
 import threading
 import time
 from typing import Any, Iterable
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+import wave
 
 
 log = logging.getLogger("woof-thermal-monitor")
@@ -41,6 +45,10 @@ UNITREE_JOINT_ORDER = (
     "RL_thigh_joint",
     "RL_calf_joint",
 )
+THERMAL_BEEP_NAME = "woof_thermal_warning_beep"
+THERMAL_BEEP_PATH = "/tmp/woof_thermal_warning_beep.wav"
+LOW_BATTERY_NAME = "woof_low_battery"
+LOW_BATTERY_PATH = "/opt/thermal-audio/woof_low_battery.wav"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -49,6 +57,13 @@ def _env_float(name: str, default: float) -> float:
 
 def _env_int(name: str, default: int) -> int:
     return int(os.environ.get(name, str(default)))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -63,6 +78,12 @@ class Config:
     warning_sustain_s: float = 10.0
     clear_sustain_s: float = 120.0
     beep_repeat_s: float = 60.0
+    motor_warning_c: float = 70.0
+    motor_critical_c: float = 80.0
+    motor_clear_c: float = 65.0
+    motor_rise_warning_c_per_min: float = 5.0
+    motor_rise_min_delta_c: float = 8.0
+    motor_rise_window_s: float = 180.0
     battery_warning_percent: int = 25
     battery_clear_percent: int = 30
     battery_retry_s: float = 60.0
@@ -70,6 +91,9 @@ class Config:
     beep_url: str = "http://127.0.0.1:8098/api/thermal/beep"
     battery_announce_url: str = "http://127.0.0.1:8098/api/battery/low"
     go2_interface: str = "enP8p1s0"
+    go2_ip: str = "192.168.123.161"
+    go2_reconnect_s: float = 2.0
+    direct_audio_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -88,6 +112,18 @@ class Config:
                 "WOOF_THERMAL_CLEAR_SUSTAIN_S", 120.0
             ),
             beep_repeat_s=_env_float("WOOF_THERMAL_BEEP_REPEAT_S", 60.0),
+            motor_warning_c=_env_float("WOOF_MOTOR_WARNING_C", 70.0),
+            motor_critical_c=_env_float("WOOF_MOTOR_CRITICAL_C", 80.0),
+            motor_clear_c=_env_float("WOOF_MOTOR_CLEAR_C", 65.0),
+            motor_rise_warning_c_per_min=_env_float(
+                "WOOF_MOTOR_RISE_WARNING_C_PER_MIN", 5.0
+            ),
+            motor_rise_min_delta_c=_env_float(
+                "WOOF_MOTOR_RISE_MIN_DELTA_C", 8.0
+            ),
+            motor_rise_window_s=_env_float(
+                "WOOF_MOTOR_RISE_WINDOW_S", 180.0
+            ),
             battery_warning_percent=_env_int(
                 "WOOF_BATTERY_WARNING_PERCENT", 25
             ),
@@ -105,6 +141,11 @@ class Config:
             go2_interface=os.environ.get(
                 "GO2_NETWORK_INTERFACE", "enP8p1s0"
             ),
+            go2_ip=os.environ.get("GO2_IP", "192.168.123.161"),
+            go2_reconnect_s=_env_float("WOOF_GO2_RECONNECT_S", 2.0),
+            direct_audio_enabled=_env_bool(
+                "WOOF_DIRECT_AUDIO_ENABLED", True
+            ),
         )
 
     def validate(self) -> None:
@@ -112,6 +153,16 @@ class Config:
             raise ValueError("sample and write intervals must be positive")
         if not self.clear_c < self.warning_c < self.critical_c:
             raise ValueError("expected clear < warning < critical thresholds")
+        if not self.motor_clear_c < self.motor_warning_c < self.motor_critical_c:
+            raise ValueError(
+                "expected motor clear < warning < critical thresholds"
+            )
+        if (
+            self.motor_rise_warning_c_per_min <= 0
+            or self.motor_rise_min_delta_c <= 0
+            or self.motor_rise_window_s <= 0
+        ):
+            raise ValueError("motor rise thresholds must be positive")
         if self.retention_days < 1:
             raise ValueError("retention must be at least one day")
         if not 0 <= self.battery_warning_percent < self.battery_clear_percent <= 100:
@@ -120,6 +171,8 @@ class Config:
             )
         if self.battery_retry_s <= 0:
             raise ValueError("battery retry interval must be positive")
+        if not 0.1 <= self.go2_reconnect_s <= 60.0:
+            raise ValueError("Go2 reconnect interval must be within 0.1..60 seconds")
 
 
 def _read_text(path: str) -> str:
@@ -143,29 +196,120 @@ def read_jetson_temperatures(
 class Go2Telemetry:
     """Read-only subscriber for actuator, battery, NTC, and fan telemetry."""
 
-    def __init__(self, interface: str) -> None:
+    def __init__(self, interface: str, reconnect_s: float = 2.0) -> None:
         self.interface = interface
+        self.reconnect_s = reconnect_s
         self._lock = threading.Lock()
         self._sample: dict[str, Any] | None = None
         self._error = "waiting for rt/lowstate"
         self._subscriber: Any = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self._connected = False
+        self._attempts = 0
+        self._last_attempt_monotonic_s: float | None = None
 
     def start(self) -> None:
-        try:
-            from unitree_sdk2py.core.channel import (
-                ChannelFactoryInitialize,
-                ChannelSubscriber,
-            )
-            from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._reconnect_until_ready,
+            daemon=True,
+            name="go2-telemetry-reconnect",
+        )
+        self._thread.start()
 
-            ChannelFactoryInitialize(0, self.interface)
-            self._subscriber = ChannelSubscriber("rt/lowstate", LowState_)
-            self._subscriber.Init(self._on_lowstate, 10)
-            log.info("Subscribed read-only to rt/lowstate on %s", self.interface)
-        except Exception as exc:
+    def _connect_once(self) -> None:
+        from unitree_sdk2py.core.channel import (
+            ChannelFactoryInitialize,
+            ChannelSubscriber,
+        )
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
+
+        ChannelFactoryInitialize(0, self.interface)
+        subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        try:
+            subscriber.Init(self._on_lowstate, 10)
+        except Exception:
+            try:
+                subscriber.Close()
+            except Exception:
+                pass
+            raise
+        self._subscriber = subscriber
+
+    def _reconnect_until_ready(self) -> None:
+        while not self._stop.is_set():
             with self._lock:
-                self._error = f"{type(exc).__name__}: {exc}"
-            log.exception("Could not subscribe to Go2 low-state telemetry")
+                self._attempts += 1
+                attempt = self._attempts
+                self._last_attempt_monotonic_s = time.monotonic()
+            try:
+                self._connect_once()
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                with self._lock:
+                    self._connected = False
+                    self._error = error
+                log.warning(
+                    "Go2 telemetry connection attempt %d failed on %s: %s; "
+                    "retrying in %.1fs",
+                    attempt,
+                    self.interface,
+                    error,
+                    self.reconnect_s,
+                )
+                if self._stop.wait(self.reconnect_s):
+                    return
+                continue
+            with self._lock:
+                self._connected = True
+                if self._sample is None:
+                    self._error = "waiting for rt/lowstate after subscriber start"
+            log.info(
+                "Subscribed read-only to rt/lowstate on %s after %d attempt(s)",
+                self.interface,
+                attempt,
+            )
+            return
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self.reconnect_s + 0.5))
+        subscriber, self._subscriber = self._subscriber, None
+        if subscriber is not None:
+            try:
+                subscriber.Close()
+            except Exception:
+                log.exception("Could not close Go2 telemetry subscriber")
+        with self._lock:
+            self._started = False
+            self._connected = False
+
+    def connection_status(self) -> dict[str, Any]:
+        with self._lock:
+            last_attempt_age_s = (
+                None
+                if self._last_attempt_monotonic_s is None
+                else round(
+                    max(0.0, time.monotonic() - self._last_attempt_monotonic_s),
+                    3,
+                )
+            )
+            return {
+                "connected": self._connected,
+                "attempts": self._attempts,
+                "interface": self.interface,
+                "reconnect_s": self.reconnect_s,
+                "last_attempt_age_s": last_attempt_age_s,
+                "error": self._error,
+            }
 
     def _on_lowstate(self, message: Any) -> None:
         try:
@@ -198,6 +342,7 @@ class Go2Telemetry:
         with self._lock:
             self._sample = sample
             self._error = ""
+            self._connected = True
 
     def snapshot(self) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
@@ -307,6 +452,280 @@ class BatteryAlertController:
     def record_result(self, success: bool) -> None:
         if success:
             self.announced = True
+
+
+class MotorAlertController:
+    """Detect absolute motor heat and unusually rapid temperature increases."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.level = "normal"
+        self.warning_since: float | None = None
+        self.clear_since: float | None = None
+        self.last_beep_at: float | None = None
+        self.history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
+
+    def _rise(self, name: str, value: float, now: float) -> tuple[float, float]:
+        samples = self.history[name]
+        samples.append((now, value))
+        cutoff = now - self.config.motor_rise_window_s
+        while len(samples) > 1 and samples[1][0] <= cutoff:
+            samples.popleft()
+        oldest_at, oldest_c = samples[0]
+        elapsed_s = max(0.0, now - oldest_at)
+        delta_c = value - oldest_c
+        rate = 0.0 if elapsed_s <= 0 else delta_c * 60.0 / elapsed_s
+        return round(rate, 3), round(delta_c, 3)
+
+    def update(
+        self, motor_c: dict[str, float], now: float
+    ) -> dict[str, Any]:
+        if not motor_c:
+            return {
+                "level": "unknown",
+                "reason": "waiting for motor telemetry",
+                "should_beep": False,
+                "hottest_motor": "",
+                "hottest_motor_c": None,
+                "fastest_rising_motor": "",
+                "fastest_rise_c_per_min": 0.0,
+                "fastest_rise_delta_c": 0.0,
+            }
+
+        rises = {
+            name: self._rise(name, float(value), now)
+            for name, value in motor_c.items()
+        }
+        hottest_name, hottest_c = max(
+            motor_c.items(), key=lambda item: float(item[1])
+        )
+        fastest_name, (fastest_rate, fastest_delta) = max(
+            rises.items(), key=lambda item: item[1][0]
+        )
+        hottest_c = float(hottest_c)
+        rapid = (
+            fastest_rate >= self.config.motor_rise_warning_c_per_min
+            and fastest_delta >= self.config.motor_rise_min_delta_c
+        )
+        absolute_warning = hottest_c >= self.config.motor_warning_c
+        critical = hottest_c >= self.config.motor_critical_c
+        previous = self.level
+
+        if critical:
+            self.level = "critical"
+            if self.warning_since is None:
+                self.warning_since = now
+            self.clear_since = None
+        elif absolute_warning or rapid:
+            if self.warning_since is None:
+                self.warning_since = now
+            self.clear_since = None
+            if now - self.warning_since >= self.config.warning_sustain_s:
+                self.level = "warning"
+        else:
+            self.warning_since = None
+            safe_to_clear = (
+                hottest_c < self.config.motor_clear_c
+                and fastest_rate
+                < self.config.motor_rise_warning_c_per_min / 2.0
+            )
+            if self.level != "normal" and safe_to_clear:
+                if self.clear_since is None:
+                    self.clear_since = now
+                if now - self.clear_since >= self.config.clear_sustain_s:
+                    self.level = "normal"
+                    self.clear_since = None
+            elif self.level != "normal":
+                self.clear_since = None
+
+        transitioned_hot = (
+            previous == "normal" and self.level in {"warning", "critical"}
+        ) or (previous == "warning" and self.level == "critical")
+        repeat_due = self.level in {"warning", "critical"} and (
+            self.last_beep_at is None
+            or now - self.last_beep_at >= self.config.beep_repeat_s
+        )
+        should_beep = transitioned_hot or repeat_due
+        if should_beep:
+            self.last_beep_at = now
+
+        if critical:
+            reason = f"motor.{hottest_name} is {hottest_c:.1f} C (critical)"
+        elif absolute_warning:
+            reason = f"motor.{hottest_name} is {hottest_c:.1f} C (warning)"
+        elif rapid:
+            reason = (
+                f"motor.{fastest_name} rose {fastest_delta:.1f} C at "
+                f"{fastest_rate:.1f} C/min"
+            )
+        elif self.level != "normal":
+            reason = "motor temperatures are cooling toward the clear boundary"
+        else:
+            reason = "motor temperatures and rise rates are within limits"
+
+        return {
+            "level": self.level,
+            "reason": reason,
+            "should_beep": should_beep,
+            "hottest_motor": hottest_name,
+            "hottest_motor_c": hottest_c,
+            "fastest_rising_motor": fastest_name,
+            "fastest_rise_c_per_min": fastest_rate,
+            "fastest_rise_delta_c": fastest_delta,
+        }
+
+
+def _audiohub_entries(response: Any) -> list[dict[str, Any]]:
+    if not isinstance(response, dict):
+        return []
+    payload: Any = response.get("data", response)
+    if isinstance(payload, dict):
+        payload = payload.get("data", payload)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, dict):
+        return []
+    records = payload.get("audio_list", [])
+    return [record for record in records if isinstance(record, dict)]
+
+
+def _named_audio_id(
+    records: list[dict[str, Any]], custom_name: str
+) -> str | None:
+    for record in records:
+        if str(record.get("CUSTOM_NAME") or "") != custom_name:
+            continue
+        unique_id = str(record.get("UNIQUE_ID") or "").strip()
+        if unique_id:
+            return unique_id
+    return None
+
+
+def _write_thermal_beep(path: str = THERMAL_BEEP_PATH) -> None:
+    """Create three short 880 Hz pulses without storing a binary asset."""
+
+    sample_rate = 44_100
+    amplitude = 13_000
+    frames = bytearray()
+    segments = ((0.16, True), (0.09, False)) * 2 + ((0.16, True),)
+    phase = 0
+    for duration_s, tone_on in segments:
+        count = int(sample_rate * duration_s)
+        for _ in range(count):
+            value = (
+                int(
+                    amplitude
+                    * math.sin(2.0 * math.pi * 880.0 * phase / sample_rate)
+                )
+                if tone_on
+                else 0
+            )
+            frames.extend(struct.pack("<h", value))
+            phase += 1
+    with wave.open(path, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate)
+        stream.writeframes(bytes(frames))
+
+
+def _audio_playback_hold_s(path: str) -> float:
+    """Allow AudioHub playback to start and finish before WebRTC disconnects."""
+
+    try:
+        with wave.open(path, "rb") as stream:
+            frame_rate = stream.getframerate()
+            duration_s = stream.getnframes() / frame_rate if frame_rate else 0.0
+    except (OSError, wave.Error):
+        duration_s = 1.0
+    return max(1.0, duration_s + 1.0)
+
+
+class DirectGo2Audio:
+    """Open a short-lived, audio-only WebRTC peer for standalone alarms."""
+
+    def __init__(self, robot_ip: str) -> None:
+        self.robot_ip = robot_ip
+        self._lock = threading.Lock()
+        self._audio_ids: dict[str, str] = {}
+
+    async def _play_once(self, custom_name: str, path: str) -> str:
+        from unitree_webrtc_connect import (
+            UnitreeWebRTCConnection,
+            WebRTCConnectionMethod,
+        )
+        from unitree_webrtc_connect.webrtc_audiohub import WebRTCAudioHub
+
+        connection = UnitreeWebRTCConnection(
+            WebRTCConnectionMethod.LocalSTA, ip=self.robot_ip
+        )
+        try:
+            await connection.connect()
+            audiohub = WebRTCAudioHub(connection)
+            unique_id = self._audio_ids.get(custom_name)
+            if not unique_id:
+                response = await audiohub.get_audio_list()
+                unique_id = _named_audio_id(
+                    _audiohub_entries(response), custom_name
+                )
+            if not unique_id:
+                await audiohub.upload_audio_file(path)
+                for _ in range(10):
+                    response = await audiohub.get_audio_list()
+                    unique_id = _named_audio_id(
+                        _audiohub_entries(response), custom_name
+                    )
+                    if unique_id:
+                        break
+                    await asyncio.sleep(0.2)
+            if not unique_id:
+                raise RuntimeError(
+                    f"{custom_name} was not registered by Go2 AudioHub"
+                )
+            await audiohub.play_by_uuid(unique_id)
+            await asyncio.sleep(_audio_playback_hold_s(path))
+            self._audio_ids[custom_name] = unique_id
+            return unique_id
+        finally:
+            try:
+                await connection.disconnect()
+            except Exception:
+                log.exception("Direct Go2 audio disconnect failed")
+
+    async def _play_async(self, custom_name: str, path: str) -> str:
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                return await self._play_once(custom_name, path)
+            except Exception as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+                delay_s = float(attempt * 2)
+                log.warning(
+                    "Direct Go2 audio attempt %d failed: %s; retrying in %.0fs",
+                    attempt,
+                    exc,
+                    delay_s,
+                )
+                await asyncio.sleep(delay_s)
+        assert last_error is not None
+        raise last_error
+
+    def play(self, custom_name: str, path: str) -> str:
+        if not os.path.isfile(path):
+            raise RuntimeError(f"audio asset is unavailable: {path}")
+        with self._lock:
+            return str(
+                asyncio.run(
+                    asyncio.wait_for(
+                        self._play_async(custom_name, path), timeout=40.0
+                    )
+                )
+            )
 
 
 def _numeric_series(sample: dict[str, Any]) -> dict[str, float]:
@@ -434,12 +853,20 @@ class Store:
 
 
 class ThermalMonitor:
-    def __init__(self, config: Config, store: Store, go2: Go2Telemetry) -> None:
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        go2: Go2Telemetry,
+        direct_audio: DirectGo2Audio | None = None,
+    ) -> None:
         self.config = config
         self.store = store
         self.go2 = go2
         self.alert = AlertController(config)
+        self.motor_alert = MotorAlertController(config)
         self.battery_alert = BatteryAlertController(config)
+        self.direct_audio = direct_audio or DirectGo2Audio(config.go2_ip)
         self._lock = threading.Lock()
         self._current: dict[str, Any] = {
             "ok": False,
@@ -460,9 +887,19 @@ class ThermalMonitor:
             "critical_c": self.config.critical_c,
             "clear_c": self.config.clear_c,
             "retention_days": self.config.retention_days,
-            "alert_sources": ["jetson", "go2.imu"],
+            "alert_sources": ["jetson", "go2.imu", "go2.motors"],
+            "motor_warning_c": self.config.motor_warning_c,
+            "motor_critical_c": self.config.motor_critical_c,
+            "motor_clear_c": self.config.motor_clear_c,
+            "motor_rise_warning_c_per_min": (
+                self.config.motor_rise_warning_c_per_min
+            ),
+            "motor_rise_min_delta_c": self.config.motor_rise_min_delta_c,
+            "motor_rise_window_s": self.config.motor_rise_window_s,
             "battery_warning_percent": self.config.battery_warning_percent,
             "battery_clear_percent": self.config.battery_clear_percent,
+            "direct_audio_enabled": self.config.direct_audio_enabled,
+            "go2_reconnect_s": self.config.go2_reconnect_s,
         }
         return result
 
@@ -470,34 +907,58 @@ class ThermalMonitor:
         self._stop.set()
 
     def _beep(self) -> tuple[bool, str]:
-        if not self.config.beep_url:
-            return False, "beep URL is disabled"
-        request = Request(self.config.beep_url, data=b"", method="POST")
+        endpoint_error = "voice endpoint is disabled"
+        if self.config.beep_url:
+            request = Request(self.config.beep_url, data=b"", method="POST")
+            try:
+                with urlopen(request, timeout=15.0) as response:
+                    payload = json.loads(response.read() or b"{}")
+                if payload.get("ok"):
+                    return True, ""
+                endpoint_error = str(
+                    payload.get("error") or "beep request failed"
+                )
+            except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+                endpoint_error = f"{type(exc).__name__}: {exc}"
+        if not self.config.direct_audio_enabled:
+            return False, endpoint_error
         try:
-            with urlopen(request, timeout=15.0) as response:
-                payload = json.loads(response.read() or b"{}")
-            if not payload.get("ok"):
-                return False, str(payload.get("error") or "beep request failed")
+            _write_thermal_beep()
+            self.direct_audio.play(THERMAL_BEEP_NAME, THERMAL_BEEP_PATH)
             return True, ""
-        except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
-            return False, f"{type(exc).__name__}: {exc}"
+        except Exception as exc:
+            return False, (
+                f"voice endpoint: {endpoint_error}; direct Go2 audio: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _announce_low_battery(self) -> tuple[bool, str]:
-        if not self.config.battery_announce_url:
-            return False, "battery announcement URL is disabled"
-        request = Request(
-            self.config.battery_announce_url, data=b"", method="POST"
-        )
-        try:
-            with urlopen(request, timeout=15.0) as response:
-                payload = json.loads(response.read() or b"{}")
-            if not payload.get("ok"):
-                return False, str(
-                    payload.get("error") or "low-battery announcement failed"
+        endpoint_error = "voice endpoint is disabled"
+        if self.config.battery_announce_url:
+            request = Request(
+                self.config.battery_announce_url, data=b"", method="POST"
+            )
+            try:
+                with urlopen(request, timeout=15.0) as response:
+                    payload = json.loads(response.read() or b"{}")
+                if payload.get("ok"):
+                    return True, ""
+                endpoint_error = str(
+                    payload.get("error")
+                    or "low-battery announcement failed"
                 )
+            except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+                endpoint_error = f"{type(exc).__name__}: {exc}"
+        if not self.config.direct_audio_enabled:
+            return False, endpoint_error
+        try:
+            self.direct_audio.play(LOW_BATTERY_NAME, LOW_BATTERY_PATH)
             return True, ""
-        except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
-            return False, f"{type(exc).__name__}: {exc}"
+        except Exception as exc:
+            return False, (
+                f"voice endpoint: {endpoint_error}; direct Go2 audio: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def sample_once(self, now: float | None = None) -> dict[str, Any]:
         now = time.monotonic() if now is None else now
@@ -517,6 +978,10 @@ class ThermalMonitor:
             jetson.items(), key=lambda item: item[1]
         )
         go2, go2_error = self.go2.snapshot()
+        connection_status = getattr(self.go2, "connection_status", None)
+        go2_connection = (
+            connection_status() if callable(connection_status) else None
+        )
         battery_status: dict[str, Any] = {
             "level": "unknown",
             "reason": "waiting for battery telemetry",
@@ -553,9 +1018,21 @@ class ThermalMonitor:
                 "announcement_error": announcement_error,
             }
         hottest_name, hottest_c = select_alert_temperature(jetson, go2)
-        level, should_beep, reason = self.alert.update(
+        thermal_level, thermal_should_beep, thermal_reason = self.alert.update(
             hottest_c, now, sensor_name=hottest_name
         )
+        motor_status = self.motor_alert.update(
+            (go2 or {}).get("motor_c", {}), now
+        )
+        priorities = {"unknown": -1, "normal": 0, "warning": 1, "critical": 2}
+        motor_level = str(motor_status["level"])
+        if priorities.get(motor_level, -1) > priorities.get(thermal_level, -1):
+            level = motor_level
+            reason = str(motor_status["reason"])
+        else:
+            level = thermal_level
+            reason = thermal_reason
+        should_beep = thermal_should_beep or bool(motor_status["should_beep"])
         beep_ok: bool | None = None
         beep_error = ""
         if should_beep:
@@ -565,6 +1042,7 @@ class ThermalMonitor:
             else:
                 log.error("THERMAL %s: %s; beep failed: %s", level, reason, beep_error)
 
+        motor_should_beep = bool(motor_status.pop("should_beep"))
         sample = {
             "ok": True,
             "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -575,6 +1053,11 @@ class ThermalMonitor:
             "hottest_monitored_c": hottest_c,
             "go2": go2,
             "go2_error": go2_error,
+            "go2_connection": go2_connection,
+            "motor_alert": {
+                **motor_status,
+                "beep_requested": motor_should_beep,
+            },
             "battery_alert": battery_status,
             "alert": {
                 "level": level,
@@ -664,7 +1147,7 @@ def main() -> None:
         Path(config.state_dir) / "thermal.sqlite3",
         retention_days=config.retention_days,
     )
-    go2 = Go2Telemetry(config.go2_interface)
+    go2 = Go2Telemetry(config.go2_interface, config.go2_reconnect_s)
     go2.start()
     monitor = ThermalMonitor(config, store, go2)
     thread = threading.Thread(target=monitor.run, daemon=True, name="thermal-sampler")
@@ -686,6 +1169,7 @@ def main() -> None:
         server.shutdown()
         monitor.stop()
         thread.join(timeout=5.0)
+        go2.stop()
 
 
 if __name__ == "__main__":
