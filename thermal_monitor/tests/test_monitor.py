@@ -6,6 +6,9 @@ from pathlib import Path
 import sqlite3
 import sys
 import threading
+import time
+
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -80,12 +83,26 @@ def test_go2_telemetry_retries_failed_dds_initialization_without_restart(
     connected = threading.Event()
     attempts = 0
 
-    def connect_once() -> None:
+    class FakeReader:
+        def Close(self) -> None:
+            return None
+
+    def connect_once() -> FakeReader:
         nonlocal attempts
         attempts += 1
         if attempts < 3:
             raise RuntimeError("interface is not ready")
+        with telemetry._lock:
+            telemetry._sample = {
+                "received_monotonic_s": time.monotonic(),
+                "imu_c": 79.0,
+                "motor_c": {},
+            }
+            telemetry._connected = True
+            telemetry._error = ""
+        telemetry._sample_event.set()
         connected.set()
+        return FakeReader()
 
     monkeypatch.setattr(telemetry, "_connect_once", connect_once)
 
@@ -95,8 +112,168 @@ def test_go2_telemetry_retries_failed_dds_initialization_without_restart(
         assert attempts == 3
         assert telemetry.connection_status()["connected"] is True
         assert telemetry.connection_status()["attempts"] == 3
+        assert telemetry.connection_status()["reconnect_count"] == 2
+        assert "interface is not ready" in telemetry.connection_status()[
+            "reconnect_reason"
+        ]
     finally:
         telemetry.stop()
+
+
+def test_go2_snapshot_rejects_stale_data_as_disconnected() -> None:
+    telemetry = monitor.Go2Telemetry(
+        "enP8p1s0",
+        reconnect_s=0.01,
+        sample_max_age_s=0.02,
+    )
+    telemetry._sample = {
+        "received_monotonic_s": time.monotonic() - 1.0,
+        "imu_c": 79.0,
+        "motor_c": {"FR_thigh_joint": 41.0},
+    }
+    telemetry._connected = True
+
+    sample, error = telemetry.snapshot()
+    status = telemetry.connection_status()
+
+    assert sample is None
+    assert "stale" in error
+    assert status["connected"] is False
+
+
+def test_go2_telemetry_retries_when_first_sample_never_arrives(
+    monkeypatch,
+) -> None:
+    telemetry = monitor.Go2Telemetry(
+        "enP8p1s0",
+        reconnect_s=0.01,
+        sample_max_age_s=0.03,
+    )
+    readers: list[FakeReader] = []
+
+    class FakeReader:
+        open_count = 0
+        maximum_open_count = 0
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_calls = 0
+            type(self).open_count += 1
+            type(self).maximum_open_count = max(
+                type(self).maximum_open_count,
+                type(self).open_count,
+            )
+
+        def Close(self) -> None:
+            self.close_calls += 1
+            if self.closed:
+                return
+            self.closed = True
+            type(self).open_count -= 1
+
+    def connect_once() -> FakeReader:
+        reader = FakeReader()
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(telemetry, "_connect_once", connect_once)
+
+    telemetry.start()
+    deadline = time.monotonic() + 0.5
+    while len(readers) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    telemetry.stop()
+
+    assert len(readers) >= 2
+    assert readers[0].closed is True
+    assert FakeReader.maximum_open_count == 1
+    assert FakeReader.open_count == 0
+    assert all(reader.close_calls == 1 for reader in readers)
+    status = telemetry.connection_status()
+    assert status["reconnect_count"] >= 1
+    assert "first rt/lowstate sample" in status["reconnect_reason"]
+
+
+def test_go2_telemetry_reconnects_after_live_stream_becomes_stale(
+    monkeypatch,
+) -> None:
+    telemetry = monitor.Go2Telemetry(
+        "enP8p1s0",
+        reconnect_s=0.01,
+        sample_max_age_s=0.03,
+    )
+    readers: list[FakeReader] = []
+
+    class FakeReader:
+        open_count = 0
+        maximum_open_count = 0
+
+        def __init__(self) -> None:
+            self.close_calls = 0
+            type(self).open_count += 1
+            type(self).maximum_open_count = max(
+                type(self).maximum_open_count,
+                type(self).open_count,
+            )
+
+        def Close(self) -> None:
+            self.close_calls += 1
+            type(self).open_count -= 1
+
+    def connect_once() -> FakeReader:
+        reader = FakeReader()
+        readers.append(reader)
+        with telemetry._lock:
+            telemetry._sample = {
+                "received_monotonic_s": time.monotonic(),
+                "imu_c": 79.0,
+                "motor_c": {"FR_thigh_joint": 41.0},
+            }
+            telemetry._connected = True
+            telemetry._error = ""
+        telemetry._sample_event.set()
+        return reader
+
+    monkeypatch.setattr(telemetry, "_connect_once", connect_once)
+
+    telemetry.start()
+    deadline = time.monotonic() + 0.5
+    while len(readers) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    status = telemetry.connection_status()
+    sample, error = telemetry.snapshot()
+    telemetry.stop()
+
+    assert len(readers) >= 2
+    assert readers[0].close_calls == 1
+    assert FakeReader.maximum_open_count == 1
+    assert FakeReader.open_count == 0
+    assert status["reconnect_count"] >= 1
+    assert "stale rt/lowstate sample" in status["reconnect_reason"]
+    assert sample is not None
+    assert error == ""
+
+
+def test_config_reads_and_validates_go2_sample_freshness(monkeypatch) -> None:
+    monkeypatch.setenv("WOOF_GO2_SAMPLE_MAX_AGE_S", "3.5")
+
+    config = monitor.Config.from_env()
+
+    assert config.go2_sample_max_age_s == 3.5
+    config.validate()
+    with pytest.raises(ValueError, match="sample freshness"):
+        monitor.Config(go2_sample_max_age_s=0.09).validate()
+    with pytest.raises(ValueError, match="sample freshness"):
+        monitor.Config(go2_sample_max_age_s=60.1).validate()
+
+
+def test_deployed_config_requires_fresh_go2_data_and_disables_direct_audio() -> None:
+    manifest = json.loads(
+        (Path(__file__).resolve().parents[1] / "wendy.json").read_text()
+    )
+
+    assert manifest["env"]["WOOF_GO2_SAMPLE_MAX_AGE_S"] == "2"
+    assert manifest["env"]["WOOF_DIRECT_AUDIO_ENABLED"] == "0"
 
 
 def test_motor_alert_warns_on_sustained_rapid_rise() -> None:

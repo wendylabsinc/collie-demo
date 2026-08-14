@@ -93,7 +93,8 @@ class Config:
     go2_interface: str = "enP8p1s0"
     go2_ip: str = "192.168.123.161"
     go2_reconnect_s: float = 2.0
-    direct_audio_enabled: bool = True
+    go2_sample_max_age_s: float = 2.0
+    direct_audio_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -143,8 +144,11 @@ class Config:
             ),
             go2_ip=os.environ.get("GO2_IP", "192.168.123.161"),
             go2_reconnect_s=_env_float("WOOF_GO2_RECONNECT_S", 2.0),
+            go2_sample_max_age_s=_env_float(
+                "WOOF_GO2_SAMPLE_MAX_AGE_S", 2.0
+            ),
             direct_audio_enabled=_env_bool(
-                "WOOF_DIRECT_AUDIO_ENABLED", True
+                "WOOF_DIRECT_AUDIO_ENABLED", False
             ),
         )
 
@@ -173,6 +177,10 @@ class Config:
             raise ValueError("battery retry interval must be positive")
         if not 0.1 <= self.go2_reconnect_s <= 60.0:
             raise ValueError("Go2 reconnect interval must be within 0.1..60 seconds")
+        if not 0.1 <= self.go2_sample_max_age_s <= 60.0:
+            raise ValueError(
+                "Go2 sample freshness limit must be within 0.1..60 seconds"
+            )
 
 
 def _read_text(path: str) -> str:
@@ -196,19 +204,29 @@ def read_jetson_temperatures(
 class Go2Telemetry:
     """Read-only subscriber for actuator, battery, NTC, and fan telemetry."""
 
-    def __init__(self, interface: str, reconnect_s: float = 2.0) -> None:
+    def __init__(
+        self,
+        interface: str,
+        reconnect_s: float = 2.0,
+        sample_max_age_s: float = 2.0,
+    ) -> None:
         self.interface = interface
         self.reconnect_s = reconnect_s
+        self.sample_max_age_s = sample_max_age_s
         self._lock = threading.Lock()
         self._sample: dict[str, Any] | None = None
         self._error = "waiting for rt/lowstate"
         self._subscriber: Any = None
+        self._sample_event = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = False
         self._connected = False
         self._attempts = 0
+        self._reconnect_count = 0
+        self._reconnect_reason = ""
         self._last_attempt_monotonic_s: float | None = None
+        self._factory_initialized = False
 
     def start(self) -> None:
         with self._lock:
@@ -216,6 +234,7 @@ class Go2Telemetry:
                 return
             self._started = True
             self._stop.clear()
+            self._sample_event.clear()
         self._thread = threading.Thread(
             target=self._reconnect_until_ready,
             daemon=True,
@@ -223,14 +242,16 @@ class Go2Telemetry:
         )
         self._thread.start()
 
-    def _connect_once(self) -> None:
+    def _connect_once(self) -> Any:
         from unitree_sdk2py.core.channel import (
             ChannelFactoryInitialize,
             ChannelSubscriber,
         )
         from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 
-        ChannelFactoryInitialize(0, self.interface)
+        if not self._factory_initialized:
+            ChannelFactoryInitialize(0, self.interface)
+            self._factory_initialized = True
         subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         try:
             subscriber.Init(self._on_lowstate, 10)
@@ -240,21 +261,46 @@ class Go2Telemetry:
             except Exception:
                 pass
             raise
-        self._subscriber = subscriber
+        return subscriber
+
+    def _close_subscriber(self, subscriber: Any) -> None:
+        if subscriber is None:
+            return
+        try:
+            subscriber.Close()
+        except Exception:
+            log.exception("Could not close Go2 telemetry subscriber")
+
+    def _record_reconnect(self, reason: str, subscriber: Any) -> None:
+        self._close_subscriber(subscriber)
+        with self._lock:
+            if self._subscriber is subscriber:
+                self._subscriber = None
+            self._sample = None
+            self._connected = False
+            self._error = reason
+            self._reconnect_count += 1
+            self._reconnect_reason = reason
+        self._sample_event.clear()
 
     def _reconnect_until_ready(self) -> None:
         while not self._stop.is_set():
+            subscriber: Any = None
             with self._lock:
                 self._attempts += 1
                 attempt = self._attempts
                 self._last_attempt_monotonic_s = time.monotonic()
+                self._sample = None
+                self._connected = False
+                self._error = "waiting for rt/lowstate after subscriber start"
+            self._sample_event.clear()
             try:
-                self._connect_once()
+                subscriber = self._connect_once()
+                with self._lock:
+                    self._subscriber = subscriber
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
-                with self._lock:
-                    self._connected = False
-                    self._error = error
+                self._record_reconnect(error, subscriber)
                 log.warning(
                     "Go2 telemetry connection attempt %d failed on %s: %s; "
                     "retrying in %.1fs",
@@ -266,28 +312,73 @@ class Go2Telemetry:
                 if self._stop.wait(self.reconnect_s):
                     return
                 continue
-            with self._lock:
-                self._connected = True
-                if self._sample is None:
-                    self._error = "waiting for rt/lowstate after subscriber start"
+
+            if not self._sample_event.wait(self.sample_max_age_s):
+                reason = (
+                    "first rt/lowstate sample did not arrive within "
+                    f"{self.sample_max_age_s:.3f}s"
+                )
+                self._record_reconnect(reason, subscriber)
+                log.warning(
+                    "Go2 telemetry connection attempt %d produced no sample on %s; "
+                    "retrying in %.1fs",
+                    attempt,
+                    self.interface,
+                    self.reconnect_s,
+                )
+                if self._stop.wait(self.reconnect_s):
+                    return
+                continue
+            if self._stop.is_set():
+                return
+
             log.info(
                 "Subscribed read-only to rt/lowstate on %s after %d attempt(s)",
                 self.interface,
                 attempt,
             )
-            return
+            check_s = max(0.01, min(0.25, self.sample_max_age_s / 2.0))
+            while not self._stop.wait(check_s):
+                with self._lock:
+                    sample = self._sample
+                    received_at = (
+                        None
+                        if sample is None
+                        else float(sample["received_monotonic_s"])
+                    )
+                age_s = (
+                    float("inf")
+                    if received_at is None
+                    else max(0.0, time.monotonic() - received_at)
+                )
+                if age_s <= self.sample_max_age_s:
+                    continue
+                reason = (
+                    f"stale rt/lowstate sample: {age_s:.3f}s exceeds "
+                    f"{self.sample_max_age_s:.3f}s"
+                )
+                self._record_reconnect(reason, subscriber)
+                log.warning(
+                    "Go2 telemetry stream became stale on %s: %s; "
+                    "retrying in %.1fs",
+                    self.interface,
+                    reason,
+                    self.reconnect_s,
+                )
+                if self._stop.wait(self.reconnect_s):
+                    return
+                break
+            else:
+                return
 
     def stop(self) -> None:
         self._stop.set()
+        self._sample_event.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(1.0, self.reconnect_s + 0.5))
         subscriber, self._subscriber = self._subscriber, None
-        if subscriber is not None:
-            try:
-                subscriber.Close()
-            except Exception:
-                log.exception("Could not close Go2 telemetry subscriber")
+        self._close_subscriber(subscriber)
         with self._lock:
             self._started = False
             self._connected = False
@@ -305,6 +396,8 @@ class Go2Telemetry:
             return {
                 "connected": self._connected,
                 "attempts": self._attempts,
+                "reconnect_count": self._reconnect_count,
+                "reconnect_reason": self._reconnect_reason,
                 "interface": self.interface,
                 "reconnect_s": self.reconnect_s,
                 "last_attempt_age_s": last_attempt_age_s,
@@ -343,16 +436,24 @@ class Go2Telemetry:
             self._sample = sample
             self._error = ""
             self._connected = True
+        self._sample_event.set()
 
     def snapshot(self) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
             if self._sample is None:
                 return None, self._error
             result = dict(self._sample)
-            result["age_s"] = round(
-                max(0.0, time.monotonic() - result.pop("received_monotonic_s")),
-                3,
+            age_s = max(
+                0.0, time.monotonic() - result.pop("received_monotonic_s")
             )
+            if age_s > self.sample_max_age_s:
+                self._connected = False
+                self._error = (
+                    f"stale rt/lowstate sample: {age_s:.3f}s exceeds "
+                    f"{self.sample_max_age_s:.3f}s"
+                )
+                return None, self._error
+            result["age_s"] = round(age_s, 3)
             return result, self._error
 
 
@@ -900,6 +1001,7 @@ class ThermalMonitor:
             "battery_clear_percent": self.config.battery_clear_percent,
             "direct_audio_enabled": self.config.direct_audio_enabled,
             "go2_reconnect_s": self.config.go2_reconnect_s,
+            "go2_sample_max_age_s": self.config.go2_sample_max_age_s,
         }
         return result
 
@@ -1147,7 +1249,11 @@ def main() -> None:
         Path(config.state_dir) / "thermal.sqlite3",
         retention_days=config.retention_days,
     )
-    go2 = Go2Telemetry(config.go2_interface, config.go2_reconnect_s)
+    go2 = Go2Telemetry(
+        config.go2_interface,
+        config.go2_reconnect_s,
+        config.go2_sample_max_age_s,
+    )
     go2.start()
     monitor = ThermalMonitor(config, store, go2)
     thread = threading.Thread(target=monitor.run, daemon=True, name="thermal-sampler")

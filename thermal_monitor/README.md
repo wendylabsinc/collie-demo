@@ -20,17 +20,27 @@ The app never publishes a Unitree command and does not stop, move, throttle, or
 shut down the robot.
 
 Go2 DDS initialization is retried in the background every two seconds when the
-robot-side Ethernet interface is not ready yet. Jetson sampling and the HTTP API
-remain available during recovery. Configure the interval with
-`WOOF_GO2_RECONNECT_S` (seconds, default `2`, valid range `0.1..60`); this changes
-only read-only telemetry recovery and grants no motion authority.
+robot-side Ethernet interface is not ready yet. The same loop closes and
+recreates its single reader if the first sample does not arrive or the live
+stream becomes stale. Jetson sampling and the HTTP API remain available during
+recovery, but stale Go2 values are omitted rather than reported as current.
 
-The monitor first reuses Collie's voice service on port 8098 when it is running.
-If it is stopped, the monitor opens a short-lived, audio-only WebRTC connection
-to the Go2, plays the alarm through the robot speaker, and disconnects. It does
-not enable the camera, microphone, speech recognition, or motion stack. Live API
-status records whether each audio request actually succeeded. The direct path
-uses bounded backoff for the Go2's WebRTC handshake rate limit.
+- `WOOF_GO2_RECONNECT_S`: seconds between reader attempts; default `2`, valid
+  range `0.1..60`.
+- `WOOF_GO2_SAMPLE_MAX_AGE_S`: maximum age in seconds for a Go2 sample and the
+  deadline for the first sample from a new reader; default `2`, valid range
+  `0.1..60`. This is a read-only health limit and never authorizes motion.
+
+`go2_connection.reconnect_count` and `reconnect_reason` expose recovery history
+through `/api/status` and the persisted 30-second records.
+
+The monitor reuses Collie's voice service on port 8098 when it is running. The
+standalone WebRTC fallback is disabled in the deployed manifest because the
+current library creates a full peer, including a video track, and therefore has
+not proven the required audio-only non-interference contract during a demo.
+`WOOF_DIRECT_AUDIO_ENABLED=0` is the safe default. If the voice endpoint is
+unavailable, the alert remains visible and persisted while `beep_ok=false`
+records that no audible alarm played.
 
 ## Thresholds
 
