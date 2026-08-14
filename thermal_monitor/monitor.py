@@ -88,7 +88,7 @@ class Config:
     battery_clear_percent: int = 30
     battery_retry_s: float = 60.0
     retention_days: int = 30
-    beep_url: str = "http://127.0.0.1:8098/api/thermal/beep"
+    beep_url: str = "http://127.0.0.1:8110/api/thermal/beep"
     battery_announce_url: str = "http://127.0.0.1:8098/api/battery/low"
     go2_interface: str = "enP8p1s0"
     go2_ip: str = "192.168.123.161"
@@ -133,7 +133,7 @@ class Config:
             retention_days=_env_int("WOOF_THERMAL_RETENTION_DAYS", 30),
             beep_url=os.environ.get(
                 "WOOF_THERMAL_BEEP_URL",
-                "http://127.0.0.1:8098/api/thermal/beep",
+                "http://127.0.0.1:8110/api/thermal/beep",
             ),
             battery_announce_url=os.environ.get(
                 "WOOF_BATTERY_ANNOUNCE_URL",

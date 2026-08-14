@@ -274,6 +274,9 @@ def test_deployed_config_requires_fresh_go2_data_and_disables_direct_audio() -> 
 
     assert manifest["env"]["WOOF_GO2_SAMPLE_MAX_AGE_S"] == "2"
     assert manifest["env"]["WOOF_DIRECT_AUDIO_ENABLED"] == "0"
+    assert manifest["env"]["WOOF_THERMAL_BEEP_URL"] == (
+        "http://127.0.0.1:8110/api/thermal/beep"
+    )
 
 
 def test_motor_alert_warns_on_sustained_rapid_rise() -> None:

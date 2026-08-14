@@ -34,7 +34,10 @@ recovery, but stale Go2 values are omitted rather than reported as current.
 `go2_connection.reconnect_count` and `reconnect_reason` expose recovery history
 through `/api/status` and the persisted 30-second records.
 
-The monitor reuses Collie's voice service on port 8098 when it is running. The
+The monitor asks the active Border Collie app on port 8110 for one serialized
+thermal alert. That app temporarily sets the Go2 speaker to `10/10`, asks its
+existing media AudioHub owner to play the beep, then verifies the speaker is
+muted again. The thermal monitor never opens another Go2 audio/video peer. The
 standalone WebRTC fallback is disabled in the deployed manifest because the
 current library creates a full peer, including a video track, and therefore has
 not proven the required audio-only non-interference contract during a demo.

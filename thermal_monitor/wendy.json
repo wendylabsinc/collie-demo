@@ -33,7 +33,7 @@
     "WOOF_BATTERY_RETRY_S": "60",
     "WOOF_BATTERY_ANNOUNCE_URL": "http://127.0.0.1:8098/api/battery/low",
     "WOOF_THERMAL_RETENTION_DAYS": "30",
-    "WOOF_THERMAL_BEEP_URL": "http://127.0.0.1:8098/api/thermal/beep",
+    "WOOF_THERMAL_BEEP_URL": "http://127.0.0.1:8110/api/thermal/beep",
     "WOOF_DIRECT_AUDIO_ENABLED": "0",
     "GO2_IP": "192.168.123.161",
     "WOOF_GO2_RECONNECT_S": "2",
